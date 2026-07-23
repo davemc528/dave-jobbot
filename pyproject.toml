@@ -1,0 +1,38 @@
+[project]
+name = "dave-jobbot"
+version = "0.1.0"
+description = "Local, privacy-conscious AI job application assistant"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.9",
+    "typer>=0.12",
+    "streamlit>=1.38",
+    "playwright>=1.48",
+    "pytest>=8.3",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pyyaml>=6.0",
+    "pypdf>=5.0",
+]
+
+[project.scripts]
+jobbot = "jobbot.cli:app"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["jobbot"]
+ignore_missing_imports = true

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><title>Mock Oncology MSL Application</title></head>
+  <body>
+    <form>
+      <label>First name <input name="first_name"></label>
+      <label>Last name <input name="last_name"></label>
+      <label>Email <input name="email" type="email"></label>
+      <label>Phone <input name="phone" type="tel"></label>
+      <label>City and state <input name="city_state"></label>
+      <label>LinkedIn <input name="linkedin_url" type="url"></label>
+      <label>Highest degree <input name="highest_degree"></label>
+      <label>Current employer <input name="current_employer"></label>
+      <label>Years of oncology experience <input name="oncology_years"></label>
+      <label>Work authorization <select name="work_authorization">
+        <option value="">Select</option><option>Yes</option><option>No</option>
+        <option>Prefer not to answer</option>
+      </select></label>
+      <label>Sponsorship <select name="sponsorship">
+        <option value="">Select</option><option>Yes</option><option>No</option>
+        <option>Prefer not to answer</option>
+      </select></label>
+      <label>Travel <input name="travel"></label>
+      <label>Relocation <input name="relocation"></label>
+      <label>Resume <input name="resume" type="file"></label>
+      <label>Publication <textarea name="publication"></textarea></label>
+      <label>Qualifications <textarea name="qualifications"></textarea></label>
+      <fieldset>
+        <legend>Optional EEO</legend>
+        <label>EEO response <select name="eeo">
+          <option>Prefer not to answer</option><option>Manual response</option>
+        </select></label>
+      </fieldset>
+      <input name="patent_summary">
+      <button type="submit">Submit Application</button>
+    </form>
+  </body>
+</html>

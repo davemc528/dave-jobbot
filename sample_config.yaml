@@ -1,0 +1,13 @@
+project:
+  name: dave-jobbot
+  environment: development
+  review_threshold: 0.72
+browser:
+  visible: true
+  headless: false
+llm:
+  provider: ollama
+  base_url: http://localhost:11434/v1
+  model: llama3.2
+privacy:
+  redact_logs: true
