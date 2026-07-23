@@ -22,6 +22,9 @@ BASE_DOCUMENTS = {
         BASE_DIR / "source_documents" / "David_Cunningham_FAS_Resume.docx"
     ),
     "Biology Teaching / Academic": BASE_DIR / "source_documents" / "Dave Cunningham.CV.pdf",
+    "Discovery / Translational Scientist": (
+        BASE_DIR / "source_documents" / "David_Cunningham_MSL_Resume.docx"
+    ),
 }
 
 

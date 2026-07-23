@@ -20,6 +20,11 @@ TRACKING_QUERY_KEYS = {
     "msclkid",
     "mc_cid",
     "mc_eid",
+    "source",
+    "src",
+    "trackingid",
+    "ref",
+    "referral",
 }
 
 

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Dave Jobbot</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <header>
+      <div>
+        <p class="eyebrow">LOCAL · VERIFIED · SUPERVISED</p>
+        <h1>Dave Jobbot</h1>
+      </div>
+      <span id="status" class="badge disconnected">Bridge disconnected</span>
+    </header>
+
+    <section id="pairing" class="card">
+      <label for="pair-code">One-time pairing code</label>
+      <div class="inline">
+        <input id="pair-code" inputmode="numeric" maxlength="6" autocomplete="off">
+        <button id="pair">Pair</button>
+      </div>
+    </section>
+
+    <section class="card facts" aria-live="polite">
+      <dl>
+        <div><dt>Page</dt><dd id="page-title">—</dd></div>
+        <div><dt>Host</dt><dd id="hostname">—</dd></div>
+        <div><dt>Employer</dt><dd id="employer">—</dd></div>
+        <div><dt>Role</dt><dd id="job-title">—</dd></div>
+        <div><dt>Location</dt><dd id="location">—</dd></div>
+        <div><dt>ATS</dt><dd id="ats">—</dd></div>
+        <div><dt>Job ID</dt><dd id="job-id">—</dd></div>
+        <div><dt>Fit</dt><dd id="fit-score">—</dd></div>
+        <div><dt>Resume</dt><dd id="resume-state">—</dd></div>
+        <div><dt>Stage</dt><dd id="stage">Idle</dd></div>
+      </dl>
+      <p id="message" class="message"></p>
+      <div id="host-approval" hidden>
+        <p>Allow Dave Jobbot to capture and fill pages on:</p>
+        <strong id="host-request"></strong>
+        <button id="allow-host">Allow exact hostname</button>
+      </div>
+      <details id="withheld">
+        <summary>Withheld fields</summary>
+        <ul id="withheld-list"></ul>
+      </details>
+    </section>
+
+    <section class="controls">
+      <button id="capture" class="primary">Capture and Analyze</button>
+      <button id="refresh">Refresh Posting</button>
+      <button id="tailor">Tailor Resume</button>
+      <button id="open-resume">Open Tailored Resume</button>
+      <button id="dashboard">Open Review Dashboard</button>
+      <button id="approve">Approve Resume</button>
+      <button id="fill">Fill This Page</button>
+      <button id="continue">Continue After Navigation</button>
+      <button id="show-withheld">Show Withheld Fields</button>
+      <button id="stop" class="danger">Stop Automation</button>
+      <button id="audit">Open Audit Log</button>
+      <button id="settings">Extension Settings</button>
+    </section>
+
+    <section id="settings-panel" class="card" hidden>
+      <h2>Extension settings</h2>
+      <ul id="approved-hosts"></ul>
+      <button id="refresh-hosts">Refresh approved hosts</button>
+      <button id="clear-state" class="danger">Clear Extension State</button>
+    </section>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

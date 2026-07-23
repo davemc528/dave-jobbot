@@ -1,0 +1,22 @@
+{
+  "name": "dave-jobbot-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/build.mjs --watch",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.37",
+    "@types/jsdom": "^28.0.3",
+    "@types/node": "^26.1.1",
+    "esbuild": "^0.27.3",
+    "jsdom": "^28.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}

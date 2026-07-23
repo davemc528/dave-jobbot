@@ -7,6 +7,7 @@ from .config import resolve_db_path
 from .migrations import (
     record_canonical_supersession_migration,
     record_phase_2a_migration,
+    record_phase_2b_migration,
     record_phase_15_migration,
     record_phase_16_migration,
     record_phase_16_state_fix,
@@ -295,6 +296,52 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
             validation_status TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS extension_pairing_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code_hash TEXT NOT NULL UNIQUE,
+            expires_at TEXT NOT NULL,
+            used_at TEXT,
+            failed_attempts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS extension_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_hash TEXT NOT NULL UNIQUE,
+            label TEXT NOT NULL DEFAULT 'Chrome extension',
+            created_at TEXT NOT NULL,
+            last_used_at TEXT,
+            revoked_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS extension_approved_hosts (
+            hostname TEXT PRIMARY KEY,
+            approved_at TEXT NOT NULL,
+            token_id INTEGER REFERENCES extension_tokens(id),
+            revoked_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS extension_tab_associations (
+            tab_key TEXT PRIMARY KEY,
+            job_id INTEGER NOT NULL REFERENCES jobs(id),
+            hostname TEXT NOT NULL,
+            posting_url TEXT,
+            application_url TEXT,
+            requisition_id TEXT,
+            stage TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS extension_job_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL REFERENCES jobs(id),
+            normalized_url TEXT,
+            extraction_method TEXT NOT NULL,
+            extraction_confidence REAL NOT NULL,
+            payload_json TEXT NOT NULL,
+            captured_at TEXT NOT NULL
+        );
+
         """
     )
     record_phase_15_migration(connection)
@@ -332,4 +379,5 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
             connection.execute(f"ALTER TABLE canonical_facts ADD COLUMN {column} {definition}")
     record_canonical_supersession_migration(connection)
     record_phase_2a_migration(connection)
+    record_phase_2b_migration(connection)
     connection.commit()

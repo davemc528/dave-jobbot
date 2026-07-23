@@ -1,0 +1,29 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  color: #172033;
+  background: #f4f6fa;
+}
+body { width: 390px; margin: 0; padding: 16px; }
+header { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+h1 { margin: 0; font-size: 24px; letter-spacing: -0.03em; }
+h2 { font-size: 16px; }
+.eyebrow { margin: 0 0 3px; color: #50627f; font-size: 10px; font-weight: 800; letter-spacing: .11em; }
+.badge { border-radius: 999px; padding: 6px 9px; font-size: 11px; font-weight: 750; }
+.connected { background: #dff6e8; color: #116331; }
+.disconnected { background: #fde5e3; color: #922b21; }
+.card { margin-top: 13px; padding: 13px; border: 1px solid #dce2ec; border-radius: 12px; background: white; box-shadow: 0 4px 14px #1720330b; }
+.inline { display: flex; gap: 8px; margin-top: 6px; }
+input { min-width: 0; flex: 1; border: 1px solid #b8c3d4; border-radius: 7px; padding: 8px; }
+dl { margin: 0; }
+dl div { display: grid; grid-template-columns: 78px 1fr; gap: 8px; padding: 4px 0; }
+dt { color: #687890; font-size: 12px; }
+dd { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+.message { margin-bottom: 0; color: #384860; font-size: 12px; }
+.controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 13px; }
+button { border: 1px solid #bdc8d8; border-radius: 8px; background: white; color: #21314a; padding: 9px; font-weight: 650; cursor: pointer; }
+button:hover, button:focus-visible { border-color: #2d63d7; outline: 2px solid #2d63d733; }
+.primary { background: #245ac7; color: white; border-color: #245ac7; }
+.danger { color: #9a281f; border-color: #e2aaa5; }
+details { margin-top: 10px; font-size: 12px; }
+[hidden] { display: none !important; }

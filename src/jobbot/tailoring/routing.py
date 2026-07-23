@@ -39,6 +39,22 @@ ACADEMIC_KEYWORDS = {
     "teaching",
 }
 
+DISCOVERY_KEYWORDS = {
+    "discovery scientist",
+    "translational scientist",
+    "translational research",
+    "preclinical research",
+    "cancer immunology",
+    "immuno-oncology",
+    "car-t",
+    "car t",
+    "gene therapy",
+    "target identification",
+    "target validation",
+    "in vitro",
+    "in vivo",
+}
+
 
 def select_resume_track(job_title: str, description: str) -> ResumeRouteResult:
     title = (job_title or "").lower()
@@ -49,6 +65,7 @@ def select_resume_track(job_title: str, description: str) -> ResumeRouteResult:
         "MSL / Medical Affairs": 0,
         "FAS / Technical Applications": 0,
         "Biology Teaching / Academic": 0,
+        "Discovery / Translational Scientist": 0,
     }
     reasons: list[str] = []
     conflicting_signals: list[str] = []
@@ -65,6 +82,10 @@ def select_resume_track(job_title: str, description: str) -> ResumeRouteResult:
         if keyword in combined:
             scores["Biology Teaching / Academic"] += 2
             reasons.append(f"Matched academic keyword: {keyword}")
+    for keyword in DISCOVERY_KEYWORDS:
+        if keyword in combined:
+            scores["Discovery / Translational Scientist"] += 2
+            reasons.append(f"Matched discovery-related keyword: {keyword}")
 
     if "liaison" in title or "liaison" in description_text:
         scores["MSL / Medical Affairs"] += 2
@@ -75,6 +96,9 @@ def select_resume_track(job_title: str, description: str) -> ResumeRouteResult:
     if "teaching" in title or "faculty" in title or "instructor" in title:
         scores["Biology Teaching / Academic"] += 2
         reasons.append("Role title suggests academic/teaching")
+    if "discovery" in title or "translational" in title:
+        scores["Discovery / Translational Scientist"] += 3
+        reasons.append("Role title explicitly indicates discovery/translational science")
 
     winner = max(scores, key=lambda track: scores[track])
     confidence = min(0.95, max(0.55, scores[winner] / 8.0))
@@ -83,6 +107,14 @@ def select_resume_track(job_title: str, description: str) -> ResumeRouteResult:
         conflicting_signals.append("Mixed MSL/FAS signals detected")
     if scores["Biology Teaching / Academic"] and winner != "Biology Teaching / Academic":
         conflicting_signals.append("Academic signal conflicts with non-academic track")
+    if (
+        scores["Discovery / Translational Scientist"]
+        and scores["FAS / Technical Applications"]
+        and winner == "Discovery / Translational Scientist"
+    ):
+        conflicting_signals.append(
+            "Technical-method signals retained but discovery role takes precedence over FAS"
+        )
 
     return ResumeRouteResult(
         selected_track=winner,

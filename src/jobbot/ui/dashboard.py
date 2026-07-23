@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from collections import Counter
 from pathlib import Path
 
@@ -417,6 +418,82 @@ def _resume_review_page() -> None:
     connection.close()
 
 
+def _extension_page() -> None:
+    st.title("Chrome Extension")
+    connection = get_connection()
+    bridge_online = False
+    try:
+        with socket.create_connection(("127.0.0.1", 8765), timeout=0.1):
+            bridge_online = True
+    except OSError:
+        pass
+    st.metric("Bridge status", "Connected" if bridge_online else "Not running")
+    sessions = connection.execute(
+        """
+        SELECT id, label, created_at, last_used_at FROM extension_tokens
+        WHERE revoked_at IS NULL ORDER BY id DESC
+        """
+    ).fetchall()
+    hosts = connection.execute(
+        """
+        SELECT hostname, approved_at FROM extension_approved_hosts
+        WHERE revoked_at IS NULL ORDER BY hostname
+        """
+    ).fetchall()
+    tabs = connection.execute(
+        """
+        SELECT tab_key, job_id, hostname, stage, updated_at
+        FROM extension_tab_associations ORDER BY updated_at DESC
+        """
+    ).fetchall()
+    st.subheader("Paired extension sessions")
+    st.dataframe([dict(row) for row in sessions], width="stretch")
+    if st.button("Revoke all extension sessions"):
+        connection.execute(
+            "UPDATE extension_tokens SET revoked_at=datetime('now') WHERE revoked_at IS NULL"
+        )
+        connection.commit()
+        st.rerun()
+    st.subheader("Approved exact hostnames")
+    for host in hosts:
+        columns = st.columns([4, 1])
+        columns[0].write(f"{host['hostname']} — {host['approved_at']}")
+        if columns[1].button("Revoke", key=f"revoke-host-{host['hostname']}"):
+            connection.execute(
+                """
+                UPDATE extension_approved_hosts SET revoked_at=datetime('now')
+                WHERE hostname=?
+                """,
+                (host["hostname"],),
+            )
+            connection.commit()
+            st.rerun()
+    st.subheader("Current tab and job associations")
+    st.dataframe([dict(row) for row in tabs], width="stretch")
+    captures = connection.execute(
+        """
+        SELECT extension_job_snapshots.id, job_id, extraction_method,
+          extraction_confidence, captured_at
+        FROM extension_job_snapshots ORDER BY id DESC LIMIT 100
+        """
+    ).fetchall()
+    st.subheader("Captured jobs")
+    st.dataframe([dict(row) for row in captures], width="stretch")
+    audits = connection.execute(
+        """
+        SELECT created_at, action, after_json FROM profile_audit_log
+        WHERE action IN (
+          'supervised_page_fill', 'stopped_before_submit',
+          'captcha_detected', 'authentication_pause'
+        )
+        ORDER BY id DESC LIMIT 100
+        """
+    ).fetchall()
+    st.subheader("Autofill, withheld-field, CAPTCHA, and authentication audit")
+    st.dataframe([dict(row) for row in audits], width="stretch")
+    connection.close()
+
+
 def _application_answers_page() -> None:
     st.title("Application Answers")
     connection = get_connection()
@@ -521,6 +598,7 @@ def launch_dashboard() -> None:
             "Application Answers",
             "Jobs and applications",
             "Tailored Resume Review",
+            "Chrome Extension",
         ],
     )
     if page == "Profile Verification":
@@ -529,8 +607,10 @@ def launch_dashboard() -> None:
         _application_answers_page()
     elif page == "Jobs and applications":
         _jobs_page()
-    else:
+    elif page == "Tailored Resume Review":
         _resume_review_page()
+    else:
+        _extension_page()
 
 
 launch_dashboard()

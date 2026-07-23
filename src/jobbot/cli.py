@@ -38,6 +38,7 @@ from jobbot.jobs.intake import (
 )
 from jobbot.jobs.scoring import score_job
 from jobbot.jobs.update import normalize_application_url, update_application_url
+from jobbot.extension.service import create_pairing_code, revoke_tokens
 from jobbot.models import JobPost
 from jobbot.profile.store import load_profile
 from jobbot.profile.canonical import (
@@ -71,6 +72,7 @@ intake_app = typer.Typer(help="Apply explicitly approved profile answers.")
 answers_app = typer.Typer(help="Inspect verified application answers.")
 review_app = typer.Typer(help="Review automation blockers.")
 resume_app = typer.Typer(help="Generate, validate, and approve tailored resumes.")
+extension_app = typer.Typer(help="Pair and run the local Chrome extension bridge.")
 profile_app.add_typer(intake_app, name="intake")
 profile_app.add_typer(answers_app, name="answers")
 app.add_typer(profile_app, name="profile")
@@ -80,6 +82,7 @@ app.add_typer(application_app, name="application")
 app.add_typer(browser_app, name="browser")
 app.add_typer(review_app, name="review")
 app.add_typer(resume_app, name="resume")
+app.add_typer(extension_app, name="extension")
 
 
 @app.command()
@@ -675,6 +678,77 @@ def dashboard() -> None:
     from streamlit.web import bootstrap
 
     bootstrap.run(str(BASE_DIR / "src/jobbot/ui/dashboard.py"), False, [], {})
+
+
+@extension_app.command("pair")
+def extension_pair() -> None:
+    with get_connection() as connection:
+        code = create_pairing_code(connection)
+    typer.echo(f"One-time pairing code: {code}")
+    typer.echo("Expires in 5 minutes and can be used only once.")
+
+
+@extension_app.command("revoke")
+def extension_revoke() -> None:
+    with get_connection() as connection:
+        count = revoke_tokens(connection)
+    typer.echo(f"Revoked {count} active extension session(s).")
+
+
+@extension_app.command("doctor")
+def extension_doctor() -> None:
+    with get_connection() as connection:
+        paired = connection.execute(
+            "SELECT count(*) FROM extension_tokens WHERE revoked_at IS NULL"
+        ).fetchone()[0]
+        hosts = [
+            row["hostname"]
+            for row in connection.execute(
+                "SELECT hostname FROM extension_approved_hosts WHERE revoked_at IS NULL"
+            )
+        ]
+        captures = connection.execute("SELECT count(*) FROM extension_job_snapshots").fetchone()[0]
+    typer.echo("Bridge: http://127.0.0.1:8765")
+    typer.echo(f"Loopback only: {True}")
+    typer.echo(f"Paired sessions: {paired}")
+    typer.echo(f"Approved hosts: {hosts}")
+    typer.echo(f"Captured snapshots: {captures}")
+    typer.echo(f"Database: {resolve_db_path()}")
+    typer.echo("Final submission: disabled")
+
+
+@extension_app.command("serve")
+def extension_serve(
+    port: int = typer.Option(
+        int(os.getenv("JOBBOT_EXTENSION_PORT", "8765")), "--port", min=1024, max=65535
+    ),
+) -> None:
+    import uvicorn
+
+    with get_connection() as connection:
+        paired = connection.execute(
+            "SELECT count(*) FROM extension_tokens WHERE revoked_at IS NULL"
+        ).fetchone()[0]
+        ready = resolve_effective_profile(connection).readiness.ready
+        resumes = connection.execute(
+            """
+            SELECT count(*) FROM tailored_resumes
+            WHERE status='approved' AND validation_status='valid'
+            """
+        ).fetchone()[0]
+    typer.echo(f"Loopback address: http://127.0.0.1:{port}")
+    typer.echo(f"Pairing status: {'paired' if paired else 'not paired'}")
+    typer.echo(f"Database path: {resolve_db_path()}")
+    typer.echo(f"Profile readiness: {ready}")
+    typer.echo(f"Approved resumes: {resumes}")
+    typer.echo("Final submit: disabled")
+    typer.echo(f"Log location: {BASE_DIR / 'logs'}")
+    uvicorn.run(
+        "jobbot.extension.api:app",
+        host="127.0.0.1",
+        port=port,
+        log_level="info",
+    )
 
 
 @app.command()
