@@ -393,7 +393,9 @@ def list_answers(
 
 
 def answer_map(connection: sqlite3.Connection) -> dict[str, ApplicationAnswer]:
-    return {answer.field_name: answer for answer in list_answers(connection)}
+    from jobbot.profile.effective_profile import effective_application_answer_map
+
+    return effective_application_answer_map(connection)
 
 
 def effective_answer_state(answer: ApplicationAnswer) -> EffectiveAnswerState:

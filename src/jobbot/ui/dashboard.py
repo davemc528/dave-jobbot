@@ -18,12 +18,13 @@ from jobbot.profile.canonical import (
     list_canonical_facts,
     mark_sensitive_manual_only,
     merge_facts,
-    missing_required_fields,
     save_intake_answer,
     seed_phase_15_proposals,
     split_fact,
+    supersede_outdated_alppl2_publications,
     update_fact,
 )
+from jobbot.profile.effective_profile import EffectiveReadinessReport, resolve_effective_profile
 
 CATEGORY_LABELS = {
     "identity": "Identity and contact",
@@ -88,15 +89,33 @@ def _tier(category: str) -> int:
     return 3
 
 
+def _render_readiness(report: EffectiveReadinessReport) -> None:
+    missing = [condition for condition in report.conditions if not condition.passed]
+    st.metric("Missing readiness conditions", len(missing))
+    for condition in report.conditions:
+        with st.expander(
+            f"{'PASS' if condition.passed else 'FAIL'} — {condition.name}",
+            expanded=not condition.passed,
+        ):
+            st.write("Effective values:", condition.effective_values or ["canonical rule"])
+            st.write("Sources:", condition.sources or ["canonical_facts"])
+            st.write(
+                "Verification status:",
+                condition.verification_statuses or ["evaluated from canonical records"],
+            )
+            st.write("Reason:", "Condition satisfied" if condition.passed else condition.reason)
+            st.caption(condition.review_hint)
+
+
 def _verification_page() -> None:
     st.title("Profile Verification")
     connection = get_connection()
     apply_canonical_proposals(connection)
     seed_phase_15_proposals(connection)
     facts = list_canonical_facts(connection)
-    counts = Counter(fact.verification_status for fact in facts)
+    counts = Counter(fact.verification_status for fact in facts if fact.active)
     raw_count = connection.execute("SELECT count(*) FROM candidate_facts").fetchone()[0]
-    missing = missing_required_fields(connection)
+    readiness = resolve_effective_profile(connection).readiness
     columns = st.columns(7)
     values = (
         ("Raw", raw_count),
@@ -109,9 +128,17 @@ def _verification_page() -> None:
     )
     for column, (label, value) in zip(columns, values, strict=True):
         column.metric(label, value)
-    st.metric("Missing readiness conditions", len(missing))
-    for failure in missing:
-        st.warning(failure)
+    _render_readiness(readiness)
+    if st.button("Supersede outdated duplicates"):
+        result = supersede_outdated_alppl2_publications(connection)
+        if result.changed_record_ids:
+            st.success(
+                f"Superseded records {result.changed_record_ids} with "
+                f"verified record {result.verified_record_id}."
+            )
+        else:
+            st.info("No active outdated ALPPL2 duplicates remain.")
+        st.rerun()
 
     selected_tier_label = st.radio(
         "Verification tier",
@@ -154,13 +181,16 @@ def _verification_page() -> None:
                     continue
                 fact_id = fact.id
                 with st.expander(
-                    f"{fact.field_name}: {fact.display_value} [{fact.verification_status}]"
+                    f"{fact.field_name}: {fact.display_value} "
+                    f"[{'inactive / superseded' if not fact.active else fact.verification_status}]"
                 ):
                     st.write("Sources:", fact.source_documents or ["Proposed canonical fact"])
                     st.write("Excerpt:", fact.source_excerpt or "No public excerpt")
                     st.write("Conflicting values:", fact.conflicting_values or "None")
                     st.write("Sensitivity:", fact.sensitivity)
                     st.write("Autofill:", fact.autofill_permission)
+                    st.write("Active:", fact.active)
+                    st.write("Superseded by:", fact.superseded_by or "None")
                     edited = st.text_input(
                         "Canonical value", fact.canonical_value or "", key=f"value-{fact.id}"
                     )
@@ -328,10 +358,12 @@ def _jobs_page() -> None:
 def _application_answers_page() -> None:
     st.title("Application Answers")
     connection = get_connection()
-    if st.button("Refresh database state"):
+    if st.button("Recalculate readiness"):
         st.cache_data.clear()
         st.cache_resource.clear()
+        connection.close()
         st.rerun()
+    profile = resolve_effective_profile(connection)
     answers = list_answers(connection)
     st.success(
         "Employment eligibility resolved: legal authorization Yes; sponsorship No; "
@@ -394,6 +426,7 @@ def _application_answers_page() -> None:
     st.dataframe([dict(row) for row in audit], width="stretch")
 
     st.header("Automation Readiness")
+    _render_readiness(profile.readiness)
     st.write(
         {
             "automatic_dry_run_enabled": AUTOMATION.enabled,

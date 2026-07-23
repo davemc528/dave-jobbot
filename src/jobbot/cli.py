@@ -32,6 +32,7 @@ from jobbot.profile.application_answers import (
     effective_answer_state,
     list_answers,
 )
+from jobbot.profile.effective_profile import resolve_effective_profile
 from jobbot.security import safe_log
 from jobbot.tailoring.routing import select_resume_track
 
@@ -236,11 +237,23 @@ def apply_profile_defaults() -> None:
 def profile_answers_list() -> None:
     with get_connection() as connection:
         answers = list_answers(connection)
+        profile = resolve_effective_profile(connection)
     for answer in answers:
         state = effective_answer_state(answer)
+        logical = (
+            "requires_sponsorship"
+            if answer.field_name == "sponsorship_required"
+            else answer.field_name
+        )
+        resolved = profile.fields.get(logical)
+        source = (
+            f"{resolved.source_table}#{resolved.source_record_id}"
+            if resolved and resolved.source_table
+            else "unresolved"
+        )
         typer.echo(
             f"{answer.field_name}: {answer.display_value} "
-            f"[{answer.verification_status}; {state.status}]"
+            f"[{answer.verification_status}; {state.status}; effective_source={source}]"
         )
 
 
@@ -480,6 +493,7 @@ def doctor() -> None:
     try:
         with get_connection() as connection:
             connection.execute("SELECT 1")
+            effective = resolve_effective_profile(connection)
             latest = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY applied_at DESC, version DESC LIMIT 1"
             ).fetchone()
@@ -512,6 +526,14 @@ def doctor() -> None:
                 f"autofill={counts['autofill'] or 0}; manual_only={counts['manual'] or 0}; "
                 f"conflicted={counts['conflicted'] or 0}; "
                 f"requiring_review={counts['review_required'] or 0}",
+            )
+        )
+        checks.append(
+            (
+                "Effective profile resolver",
+                True,
+                f"ready={effective.readiness.ready}; "
+                f"missing_conditions={len(effective.readiness.failures)}",
             )
         )
     except sqlite3.Error as exc:

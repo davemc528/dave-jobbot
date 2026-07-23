@@ -43,6 +43,8 @@ class CanonicalFact(BaseModel):
     conflicting_values: list[str] = Field(default_factory=list)
     derived_from: list[int] = Field(default_factory=list)
     supersedes: list[int] = Field(default_factory=list)
+    active: bool = True
+    superseded_by: int | None = None
 
 
 class ReadinessReport(BaseModel):
@@ -91,6 +93,7 @@ def row_to_fact(row: sqlite3.Row) -> CanonicalFact:
     for field in JSON_FIELDS:
         values[field] = json.loads(values.get(field) or "[]")
     values["autofill_permission"] = bool(values["autofill_permission"])
+    values["active"] = bool(values["active"])
     for key in ("created_at", "updated_at"):
         values.pop(key, None)
     return CanonicalFact.model_validate(values)
@@ -105,8 +108,8 @@ def _insert_fact(connection: sqlite3.Connection, fact: CanonicalFact) -> int:
           source_document, source_documents, source_excerpt, verification_status,
           verification_method, sensitivity, autofill_permission, applicable_tracks,
           date_verified, review_notes, conflicting_values, derived_from, supersedes,
-          created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          active, superseded_by, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             fact.category,
@@ -127,6 +130,8 @@ def _insert_fact(connection: sqlite3.Connection, fact: CanonicalFact) -> int:
             json.dumps(fact.conflicting_values),
             json.dumps(fact.derived_from),
             json.dumps(fact.supersedes),
+            int(fact.active),
+            fact.superseded_by,
             now,
             now,
         ),
@@ -248,6 +253,83 @@ def list_canonical_facts(connection: sqlite3.Connection) -> list[CanonicalFact]:
     ]
 
 
+class SupersessionResult(BaseModel):
+    verified_record_id: int
+    changed_record_ids: list[int] = Field(default_factory=list)
+
+
+ALPPL2_DOI = "10.1158/2326-6066.cir-25-0609"
+ALPPL2_TITLE = (
+    "coexpression of il15 promotes effector differentiation and sustained "
+    "proliferative capacity in alppl2-specific human car t cells"
+)
+ALPPL2_SUPERSESSION_NOTE = (
+    "Outdated publication-status reference superseded by verified published DOI record."
+)
+
+
+def supersede_outdated_alppl2_publications(
+    connection: sqlite3.Connection,
+) -> SupersessionResult:
+    """Deactivate only source-derived ALPPL2 status claims superseded by the verified DOI."""
+    publications = [
+        fact for fact in list_canonical_facts(connection) if fact.category == "publications"
+    ]
+    verified = [
+        fact
+        for fact in publications
+        if fact.active
+        and fact.verification_status == "verified"
+        and ALPPL2_DOI in normalize_value(fact.canonical_value)
+        and ALPPL2_TITLE in normalize_value(fact.canonical_value)
+    ]
+    if len(verified) != 1 or verified[0].id is None:
+        raise ValueError("Expected exactly one active verified ALPPL2 DOI publication record")
+    target = verified[0]
+    target_id = target.id
+    assert target_id is not None
+    outdated = [
+        fact
+        for fact in publications
+        if fact.id != target.id
+        and fact.active
+        and fact.source_document is not None
+        and fact.field_name == "alppl2_car_t_publication_status"
+        and fact.verification_status in {"unverified", "conflicted", "needs_edit"}
+    ]
+    changed: list[int] = []
+    for fact in outdated:
+        if fact.id is None:
+            continue
+        before = fact.model_dump()
+        connection.execute(
+            """
+            UPDATE canonical_facts
+            SET active=0, autofill_permission=0, superseded_by=?, updated_at=?
+            WHERE id=? AND active=1
+            """,
+            (target_id, utc_now(), fact.id),
+        )
+        _audit(
+            connection,
+            fact.id,
+            "publication_status_superseded",
+            before,
+            {
+                "active": False,
+                "autofill_permission": False,
+                "superseded_by": target_id,
+            },
+            ALPPL2_SUPERSESSION_NOTE,
+        )
+        changed.append(fact.id)
+    connection.commit()
+    return SupersessionResult(
+        verified_record_id=target_id,
+        changed_record_ids=changed,
+    )
+
+
 def get_canonical_fact(connection: sqlite3.Connection, fact_id: int) -> CanonicalFact:
     row = connection.execute("SELECT * FROM canonical_facts WHERE id = ?", (fact_id,)).fetchone()
     if row is None:
@@ -316,9 +398,9 @@ def update_fact(
             connection.execute(
                 """
                 UPDATE canonical_facts SET review_notes = ?, autofill_permission = 0,
-                  updated_at = ? WHERE id = ?
+                  active = 0, superseded_by = ?, updated_at = ? WHERE id = ?
                 """,
-                (f"Superseded by canonical fact {fact_id}", utc_now(), old_id),
+                (f"Superseded by canonical fact {fact_id}", fact_id, utc_now(), old_id),
             )
             _audit(
                 connection,
@@ -681,83 +763,10 @@ def mark_sensitive_manual_only(connection: sqlite3.Connection, field_name: str) 
 
 
 def profile_readiness(connection: sqlite3.Connection) -> ReadinessReport:
-    facts = list_canonical_facts(connection)
+    from jobbot.profile.effective_profile import resolve_effective_profile
 
-    def verified(category: str, fields: set[str] | None = None) -> bool:
-        return any(
-            fact.category == category
-            and fact.verification_status == "verified"
-            and (fields is None or fact.field_name in fields)
-            for fact in facts
-        )
-
-    failures: list[str] = []
-    if not verified("identity", {"name"}):
-        failures.append("Name is not verified")
-    verified_contact = {
-        row["field_name"]
-        for row in connection.execute(
-            """
-            SELECT field_name FROM profile_intake
-            WHERE field_name IN ('email', 'phone') AND verification_status = 'verified'
-            """
-        )
-    }
-    email_verified = verified("contact_information", {"email"}) or "email" in verified_contact
-    phone_verified = verified("contact_information", {"phone"}) or "phone" in verified_contact
-    if not (email_verified and phone_verified):
-        failures.append("Email and phone are not verified")
-    contact = connection.execute(
-        """
-        SELECT field_name FROM profile_intake
-        WHERE field_name IN ('current_city_state', 'linkedin_url')
-          AND verification_status = 'verified'
-        """
-    ).fetchall()
-    contact_fields = {row["field_name"] for row in contact}
-    if "current_city_state" not in contact_fields:
-        failures.append("Current city/state is not verified")
-    if not verified("employment_history"):
-        failures.append("Employment organizations, titles, and dates are not verified")
-    if not verified("education"):
-        failures.append("Education is not verified")
-    if not any(
-        fact.category == "document_track" and fact.verification_status == "verified"
-        for fact in facts
-    ):
-        failures.append("No resume track is approved")
-    unresolved_publications = [
-        fact
-        for fact in facts
-        if fact.category == "publications"
-        and fact.verification_status in {"unverified", "conflicted", "needs_edit"}
-        and not (fact.review_notes or "").startswith("Superseded by canonical fact")
-    ]
-    if unresolved_publications:
-        failures.append("Publication conflicts or proposals remain unresolved")
-    authorization = connection.execute(
-        """
-        SELECT verification_status, manual_only FROM profile_intake
-        WHERE field_name IN ('work_authorization', 'sponsorship_requirement')
-        """
-    ).fetchall()
-    if len(authorization) < 2 or any(
-        row["verification_status"] not in {"verified", "restricted"} and not row["manual_only"]
-        for row in authorization
-    ):
-        failures.append("Work authorization and sponsorship must be verified or manual-only")
-    if any(fact.verification_status == "conflicted" and fact.autofill_permission for fact in facts):
-        failures.append("An autofill-enabled field has an unresolved conflict")
-    if any(
-        fact.category in RESTRICTED_CATEGORIES
-        and (fact.sensitivity != "restricted" or fact.autofill_permission)
-        for fact in facts
-    ):
-        failures.append("Patent data is not fully restricted")
-    # This invariant is backed by the Playwright regression test and remains explicit here.
-    if not facts:
-        failures.append("Stop-before-submit safety has not been initialized")
-    return ReadinessReport(ready=not failures, failures=failures)
+    report = resolve_effective_profile(connection).readiness
+    return ReadinessReport(ready=report.ready, failures=report.failures)
 
 
 def missing_required_fields(connection: sqlite3.Connection) -> list[str]:

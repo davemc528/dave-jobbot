@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .config import resolve_db_path
 from .migrations import (
+    record_canonical_supersession_migration,
     record_phase_15_migration,
     record_phase_16_migration,
     record_phase_16_state_fix,
@@ -157,6 +158,8 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
             conflicting_values TEXT NOT NULL DEFAULT '[]',
             derived_from TEXT NOT NULL DEFAULT '[]',
             supersedes TEXT NOT NULL DEFAULT '[]',
+            active INTEGER NOT NULL DEFAULT 1,
+            superseded_by INTEGER REFERENCES canonical_facts(id),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -255,4 +258,15 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
         if column not in answer_columns:
             connection.execute(f"ALTER TABLE application_answers ADD COLUMN {column} {definition}")
     record_phase_16_state_fix(connection)
+    canonical_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(canonical_facts)").fetchall()
+    }
+    canonical_migrations = {
+        "active": "INTEGER NOT NULL DEFAULT 1",
+        "superseded_by": "INTEGER REFERENCES canonical_facts(id)",
+    }
+    for column, definition in canonical_migrations.items():
+        if column not in canonical_columns:
+            connection.execute(f"ALTER TABLE canonical_facts ADD COLUMN {column} {definition}")
+    record_canonical_supersession_migration(connection)
     connection.commit()

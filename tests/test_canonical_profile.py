@@ -21,8 +21,10 @@ from jobbot.profile.canonical import (
     save_intake_answer,
     seed_phase_15_proposals,
     split_fact,
+    supersede_outdated_alppl2_publications,
     update_fact,
 )
+from jobbot.profile.effective_profile import resolve_effective_profile
 
 
 def database() -> sqlite3.Connection:
@@ -121,6 +123,110 @@ def test_duration_publication_superseding_and_restricted_patent() -> None:
     assert all(fact.autofill_permission is False for fact in patent_facts)
     with pytest.raises(ValueError):
         batch_approve(connection, [int(patent_facts[0].id)])
+
+
+def test_targeted_alppl2_supersession_is_idempotent_and_preserves_provenance() -> None:
+    connection = database()
+    raw_ids = [
+        add_raw(
+            connection,
+            "publications",
+            "alppl2_car_t_publication_status",
+            wording,
+            source,
+        )
+        for wording, source in (
+            ("accepted; 2026 epub ahead of print", "academic.pdf"),
+            ("2026 citation", "msl.docx"),
+            ("2026 citation", "fas.docx"),
+        )
+    ]
+    apply_canonical_proposals(connection)
+    outdated = [
+        fact
+        for fact in list_canonical_facts(connection)
+        if fact.field_name == "alppl2_car_t_publication_status"
+    ]
+    for fact in outdated:
+        connection.execute(
+            "UPDATE canonical_facts SET verification_status='conflicted' WHERE id=?",
+            (fact.id,),
+        )
+    verified_id = _insert_fact(
+        connection,
+        CanonicalFact(
+            category="publications",
+            field_name="alppl2_car_t_publication",
+            canonical_value=(
+                "Coexpression of IL15 Promotes Effector Differentiation and Sustained "
+                "Proliferative Capacity in ALPPL2-Specific Human CAR T Cells | "
+                "Cancer Immunology Research | 10.1158/2326-6066.CIR-25-0609 | published"
+            ),
+            verification_status="verified",
+            autofill_permission=True,
+        ),
+    )
+    nature_id = _insert_fact(
+        connection,
+        CanonicalFact(
+            category="publications",
+            field_name="nature_ai_benchmark_publication",
+            canonical_value=(
+                "A benchmark of expert-level academic questions to assess AI capabilities | "
+                "Nature | 10.1038/s41586-025-09962-4"
+            ),
+            verification_status="verified",
+        ),
+    )
+    connection.commit()
+    before = resolve_effective_profile(connection).readiness
+    assert "Publication conflicts or proposals remain unresolved" in before.failures
+    raw_before = connection.execute("SELECT count(*) FROM candidate_facts").fetchone()[0]
+    nature_before = dict(
+        connection.execute("SELECT * FROM canonical_facts WHERE id=?", (nature_id,)).fetchone()
+    )
+
+    first = supersede_outdated_alppl2_publications(connection)
+    second = supersede_outdated_alppl2_publications(connection)
+
+    assert first.verified_record_id == verified_id
+    assert set(first.changed_record_ids) == {int(fact.id) for fact in outdated}
+    assert second.changed_record_ids == []
+    target = get_canonical_fact(connection, verified_id)
+    assert target.active is True
+    assert target.verification_status == "verified"
+    preserved = [
+        get_canonical_fact(connection, int(fact.id)) for fact in outdated if fact.id is not None
+    ]
+    assert all(fact.active is False for fact in preserved)
+    assert all(fact.autofill_permission is False for fact in preserved)
+    assert all(fact.superseded_by == verified_id for fact in preserved)
+    assert [fact.source_excerpt for fact in preserved] == [fact.source_excerpt for fact in outdated]
+    assert (
+        connection.execute(
+            """
+        SELECT count(*) FROM canonical_facts
+        WHERE category='publications' AND active=1 AND verification_status='conflicted'
+        """
+        ).fetchone()[0]
+        == 0
+    )
+    after = resolve_effective_profile(connection).readiness
+    assert "Publication conflicts or proposals remain unresolved" not in after.failures
+    assert connection.execute("SELECT count(*) FROM candidate_facts").fetchone()[0] == raw_before
+    assert raw_before == len(raw_ids)
+    nature_after = dict(
+        connection.execute("SELECT * FROM canonical_facts WHERE id=?", (nature_id,)).fetchone()
+    )
+    assert nature_after == nature_before
+    audit = connection.execute(
+        """
+        SELECT count(*) FROM profile_audit_log
+        WHERE action='publication_status_superseded'
+          AND notes='Outdated publication-status reference superseded by verified published DOI record.'
+        """
+    ).fetchone()[0]
+    assert audit == 3
 
 
 def test_sensitive_intake_is_not_stored_and_non_inference_is_enforced() -> None:
