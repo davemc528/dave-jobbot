@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from jobbot.documents.extract import extract_text
 from jobbot.jobs.fetch import JobURLFetchError, fetch_job_url
 from jobbot.jobs.scoring import normalize_job
+from jobbot.jobs.update import normalize_application_url
 from jobbot.security import redact_url_tracking_parameters
 
 
@@ -297,7 +298,18 @@ def intake_file(path: Path) -> PostingIntake:
         raw = path.read_text(encoding="utf-8")
     else:
         raw = extract_text(path)
-    return normalize_posting(raw, source_url=None, method=f"file:{path.suffix.casefold()}")
+    lines = raw.splitlines()
+    metadata_url: str | None = None
+    if lines:
+        match = re.fullmatch(r"\s*Application URL:\s*(\S+)\s*", lines[0], re.I)
+        if match:
+            metadata_url = normalize_application_url(match.group(1))
+            raw = "\n".join(lines[1:]).lstrip()
+    return normalize_posting(
+        raw,
+        source_url=metadata_url,
+        method=f"file:{path.suffix.casefold()}",
+    )
 
 
 def import_csv(connection: sqlite3.Connection, path: Path) -> list[int]:

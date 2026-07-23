@@ -37,6 +37,7 @@ from jobbot.jobs.intake import (
     save_posting,
 )
 from jobbot.jobs.scoring import score_job
+from jobbot.jobs.update import normalize_application_url, update_application_url
 from jobbot.models import JobPost
 from jobbot.profile.store import load_profile
 from jobbot.profile.canonical import (
@@ -303,6 +304,7 @@ def job_add(
     url: str | None = typer.Option(None, "--url"),
     file: Path | None = typer.Option(None, "--file", exists=True, dir_okay=False),
     text: str | None = typer.Option(None, "--text"),
+    application_url: str | None = typer.Option(None, "--application-url"),
     timeout: float | None = typer.Option(
         None,
         "--timeout",
@@ -319,6 +321,10 @@ def job_add(
             intake = intake_file(file)
         else:
             intake = normalize_posting(text or "", source_url=None, method="pasted_text")
+        if application_url:
+            cleaned = normalize_application_url(application_url)
+            intake.normalized_url = cleaned
+            intake.fields["application_url"] = cleaned
     except JobURLFetchError as exc:
         raise typer.BadParameter(str(exc), param_hint="--url") from exc
     with get_connection() as connection:
@@ -332,6 +338,21 @@ def job_add(
     typer.echo(
         f"Added job with id {job_id}; complete={intake.complete}; warnings={intake.warnings}"
     )
+
+
+@job_app.command("update")
+def job_update(
+    job_id: int,
+    application_url: str = typer.Option(..., "--application-url"),
+) -> None:
+    try:
+        with get_connection() as connection:
+            result = update_application_url(connection, job_id, application_url)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--application-url") from exc
+    typer.echo(f"Job {job_id} application URL updated")
+    typer.echo(f"Old: {result.old_url or '(none)'}")
+    typer.echo(f"New: {result.new_url}")
 
 
 @job_app.command("import")
