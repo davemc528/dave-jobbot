@@ -5,10 +5,11 @@ import json
 import os
 import platform
 import sqlite3
+import ssl
 from pathlib import Path
 from typing import cast
-from urllib.request import Request, urlopen
 
+import certifi
 import typer
 
 from jobbot.applications.records import create_application
@@ -19,6 +20,7 @@ from jobbot.db import get_connection
 from jobbot.documents.extract import extract_text, infer_document_type
 from jobbot.documents.facts import EXPECTED_DOCUMENTS, extract_candidate_facts
 from jobbot.jobs.scoring import normalize_job, score_job
+from jobbot.jobs.fetch import JobURLFetchError, fetch_job_url
 from jobbot.models import JobPost
 from jobbot.profile.store import load_profile
 from jobbot.profile.canonical import (
@@ -272,20 +274,25 @@ def profile_answers_audit() -> None:
         typer.echo(dict(row))
 
 
-def _fetch_url(url: str) -> str:
-    request = Request(url, headers={"User-Agent": "dave-jobbot/0.1 (manual review)"})
-    with urlopen(request, timeout=20) as response:  # noqa: S310
-        return response.read().decode("utf-8", errors="replace")
-
-
 @job_app.command("add")
 def job_add(
     url: str | None = typer.Option(None, "--url"),
     file: Path | None = typer.Option(None, "--file", exists=True, dir_okay=False),
+    timeout: float | None = typer.Option(
+        None,
+        "--timeout",
+        min=0.1,
+        help="URL request timeout in seconds (or set JOBBOT_REQUEST_TIMEOUT).",
+    ),
 ) -> None:
     if (url is None) == (file is None):
         raise typer.BadParameter("Provide exactly one of --url or --file")
-    raw_text = _fetch_url(url) if url else file.read_text(encoding="utf-8")  # type: ignore[union-attr]
+    try:
+        raw_text = (
+            fetch_job_url(url, timeout=timeout) if url else file.read_text(encoding="utf-8")  # type: ignore[union-attr]
+        )
+    except JobURLFetchError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--url") from exc
     job = normalize_job(raw_text, source="url" if url else "manual")
     job.url = url
     connection = get_connection()
@@ -476,6 +483,18 @@ def doctor() -> None:
             "Python 3.12+",
             tuple(map(int, platform.python_version_tuple()[:2])) >= (3, 12),
             platform.python_version(),
+        )
+    )
+    default_paths = ssl.get_default_verify_paths()
+    ssl_cert_file = os.getenv("SSL_CERT_FILE")
+    selected_bundle = Path(ssl_cert_file) if ssl_cert_file else Path(certifi.where())
+    checks.append(
+        (
+            "TLS certificate configuration",
+            selected_bundle.is_file(),
+            f"default_paths={default_paths}; certifi={certifi.where()}; "
+            f"SSL_CERT_FILE={ssl_cert_file or 'not configured'}; "
+            f"selected_bundle_exists={selected_bundle.is_file()}",
         )
     )
     checks.append(
