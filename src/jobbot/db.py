@@ -6,6 +6,7 @@ from pathlib import Path
 from .config import resolve_db_path
 from .migrations import (
     record_canonical_supersession_migration,
+    record_phase_2a_migration,
     record_phase_15_migration,
     record_phase_16_migration,
     record_phase_16_state_fix,
@@ -233,6 +234,67 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_automation_runs_job
             ON automation_runs(job_id, created_at);
 
+        CREATE TABLE IF NOT EXISTS job_postings (
+            job_id INTEGER PRIMARY KEY REFERENCES jobs(id),
+            raw_text TEXT NOT NULL,
+            normalized_text TEXT NOT NULL,
+            normalized_url TEXT,
+            retrieval_method TEXT NOT NULL,
+            retrieved_at TEXT NOT NULL,
+            complete INTEGER NOT NULL DEFAULT 0,
+            completeness_warnings TEXT NOT NULL DEFAULT '[]',
+            normalized_fields TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE TABLE IF NOT EXISTS job_analyses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL REFERENCES jobs(id),
+            overall_score REAL NOT NULL,
+            breakdown TEXT NOT NULL,
+            matched_requirements TEXT NOT NULL,
+            unverified_requirements TEXT NOT NULL,
+            missing_requirements TEXT NOT NULL,
+            disqualifiers TEXT NOT NULL,
+            selected_track TEXT NOT NULL,
+            track_confidence REAL NOT NULL,
+            emphasis_areas TEXT NOT NULL,
+            human_questions TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS tailored_resumes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL REFERENCES jobs(id),
+            version INTEGER NOT NULL,
+            status TEXT NOT NULL CHECK (
+              status IN ('draft','needs_review','approved','rejected','superseded')
+            ),
+            selected_track TEXT NOT NULL,
+            base_document_path TEXT NOT NULL,
+            docx_path TEXT NOT NULL,
+            text_path TEXT NOT NULL,
+            report_path TEXT NOT NULL,
+            validation_path TEXT NOT NULL,
+            validation_status TEXT NOT NULL,
+            warnings TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            approved_at TEXT,
+            UNIQUE(job_id, version)
+        );
+
+        CREATE TABLE IF NOT EXISTS resume_claims (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tailored_resume_id INTEGER NOT NULL REFERENCES tailored_resumes(id),
+            claim_text TEXT NOT NULL,
+            claim_type TEXT NOT NULL,
+            supporting_fact_ids TEXT NOT NULL,
+            source_provenance TEXT NOT NULL,
+            transformation_type TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            human_review_required INTEGER NOT NULL,
+            validation_status TEXT NOT NULL
+        );
+
         """
     )
     record_phase_15_migration(connection)
@@ -269,4 +331,5 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
         if column not in canonical_columns:
             connection.execute(f"ALTER TABLE canonical_facts ADD COLUMN {column} {definition}")
     record_canonical_supersession_migration(connection)
+    record_phase_2a_migration(connection)
     connection.commit()

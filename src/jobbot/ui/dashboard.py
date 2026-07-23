@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from collections import Counter
+from pathlib import Path
 
 import streamlit as st
 
@@ -25,6 +27,8 @@ from jobbot.profile.canonical import (
     update_fact,
 )
 from jobbot.profile.effective_profile import EffectiveReadinessReport, resolve_effective_profile
+from jobbot.jobs.analysis import analyze_job
+from jobbot.resumes.tailoring import get_version, set_version_status, tailor_resume
 
 CATEGORY_LABELS = {
     "identity": "Identity and contact",
@@ -355,6 +359,64 @@ def _jobs_page() -> None:
     st.write("Manual review is mandatory; final submission is not implemented.")
 
 
+def _resume_review_page() -> None:
+    st.title("Tailored Resume Review")
+    connection = get_connection()
+    jobs = connection.execute("SELECT id, company, title FROM jobs ORDER BY id DESC").fetchall()
+    if not jobs:
+        st.info("Import a job before tailoring a resume.")
+        return
+    labels = {f"{row['id']}: {row['company']} — {row['title']}": int(row["id"]) for row in jobs}
+    selected = st.selectbox("Job", list(labels))
+    job_id = labels[selected]
+    analysis = analyze_job(connection, job_id)
+    st.subheader("Job summary and fit analysis")
+    st.json(analysis.model_dump())
+    st.write("Selected base resume:", analysis.selected_track)
+    if st.button("Regenerate as new version"):
+        try:
+            tailor_resume(connection, job_id)
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+    rows = connection.execute(
+        "SELECT id, version, status FROM tailored_resumes WHERE job_id=? ORDER BY version DESC",
+        (job_id,),
+    ).fetchall()
+    if not rows:
+        st.warning("No tailored version exists.")
+        connection.close()
+        return
+    version_labels = {f"v{row['version']} — {row['status']}": int(row["id"]) for row in rows}
+    version_id = version_labels[st.selectbox("Version", list(version_labels))]
+    version = get_version(connection, job_id, version_id)
+    report = json.loads(Path(version.report_path).read_text(encoding="utf-8"))
+    columns = st.columns(2)
+    columns[0].text_area("Base resume text", report["base_text"], height=500)
+    columns[1].text_area("Tailored ATS text", report["tailored_text"], height=500)
+    st.subheader("Changes and keyword coverage")
+    st.write(report["changes"])
+    st.write("Emphasis:", report["emphasis_areas"])
+    st.write("Withheld:", report["withheld_requirements"])
+    st.subheader("Claim provenance")
+    st.dataframe([claim.model_dump() for claim in version.claims], width="stretch")
+    st.write("Validation warnings:", version.warnings or "None")
+    st.write("DOCX:", version.docx_path)
+    st.write("ATS preview:", version.text_path)
+    actions = st.columns(3)
+    if actions[0].button("Approve version"):
+        try:
+            set_version_status(connection, job_id, version_id, "approved")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+    if actions[1].button("Reject version"):
+        set_version_status(connection, job_id, version_id, "rejected")
+        st.rerun()
+    actions[2].caption("Edit source claims in Profile Verification, then regenerate.")
+    connection.close()
+
+
 def _application_answers_page() -> None:
     st.title("Application Answers")
     connection = get_connection()
@@ -454,14 +516,21 @@ def _application_answers_page() -> None:
 def launch_dashboard() -> None:
     page = st.sidebar.radio(
         "Page",
-        ["Profile Verification", "Application Answers", "Jobs and applications"],
+        [
+            "Profile Verification",
+            "Application Answers",
+            "Jobs and applications",
+            "Tailored Resume Review",
+        ],
     )
     if page == "Profile Verification":
         _verification_page()
     elif page == "Application Answers":
         _application_answers_page()
-    else:
+    elif page == "Jobs and applications":
         _jobs_page()
+    else:
+        _resume_review_page()
 
 
 launch_dashboard()

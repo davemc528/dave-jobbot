@@ -27,8 +27,16 @@ from jobbot.config import (
 from jobbot.db import get_connection
 from jobbot.documents.extract import extract_text, infer_document_type
 from jobbot.documents.facts import EXPECTED_DOCUMENTS, extract_candidate_facts
-from jobbot.jobs.scoring import normalize_job, score_job
-from jobbot.jobs.fetch import JobURLFetchError, fetch_job_url
+from jobbot.jobs.analysis import analyze_job
+from jobbot.jobs.fetch import JobURLFetchError
+from jobbot.jobs.intake import (
+    import_csv,
+    intake_file,
+    intake_url,
+    normalize_posting,
+    save_posting,
+)
+from jobbot.jobs.scoring import score_job
 from jobbot.models import JobPost
 from jobbot.profile.store import load_profile
 from jobbot.profile.canonical import (
@@ -44,6 +52,12 @@ from jobbot.profile.application_answers import (
 )
 from jobbot.profile.effective_profile import resolve_effective_profile
 from jobbot.security import safe_log
+from jobbot.resumes.tailoring import (
+    BASE_DOCUMENTS,
+    get_version,
+    set_version_status,
+    tailor_resume,
+)
 from jobbot.tailoring.routing import select_resume_track
 
 app = typer.Typer(help="Local, human-in-the-loop job application assistant.")
@@ -55,6 +69,7 @@ browser_app = typer.Typer(help="Safely inspect and dry-run application forms.")
 intake_app = typer.Typer(help="Apply explicitly approved profile answers.")
 answers_app = typer.Typer(help="Inspect verified application answers.")
 review_app = typer.Typer(help="Review automation blockers.")
+resume_app = typer.Typer(help="Generate, validate, and approve tailored resumes.")
 profile_app.add_typer(intake_app, name="intake")
 profile_app.add_typer(answers_app, name="answers")
 app.add_typer(profile_app, name="profile")
@@ -63,6 +78,7 @@ app.add_typer(jobs_app, name="jobs")
 app.add_typer(application_app, name="application")
 app.add_typer(browser_app, name="browser")
 app.add_typer(review_app, name="review")
+app.add_typer(resume_app, name="resume")
 
 
 @app.command()
@@ -286,6 +302,7 @@ def profile_answers_audit() -> None:
 def job_add(
     url: str | None = typer.Option(None, "--url"),
     file: Path | None = typer.Option(None, "--file", exists=True, dir_okay=False),
+    text: str | None = typer.Option(None, "--text"),
     timeout: float | None = typer.Option(
         None,
         "--timeout",
@@ -293,51 +310,134 @@ def job_add(
         help="URL request timeout in seconds (or set JOBBOT_REQUEST_TIMEOUT).",
     ),
 ) -> None:
-    if (url is None) == (file is None):
-        raise typer.BadParameter("Provide exactly one of --url or --file")
+    if sum(value is not None for value in (url, file, text)) != 1:
+        raise typer.BadParameter("Provide exactly one of --url, --text, or --file")
     try:
-        raw_text = (
-            fetch_job_url(url, timeout=timeout) if url else file.read_text(encoding="utf-8")  # type: ignore[union-attr]
-        )
+        if url:
+            intake = intake_url(url, timeout=timeout)
+        elif file:
+            intake = intake_file(file)
+        else:
+            intake = normalize_posting(text or "", source_url=None, method="pasted_text")
     except JobURLFetchError as exc:
         raise typer.BadParameter(str(exc), param_hint="--url") from exc
-    job = normalize_job(raw_text, source="url" if url else "manual")
-    job.url = url
-    connection = get_connection()
-    duplicate = (
-        connection.execute("SELECT id FROM jobs WHERE url = ?", (url,)).fetchone() if url else None
+    with get_connection() as connection:
+        if intake.normalized_url:
+            duplicate = connection.execute(
+                "SELECT id FROM jobs WHERE url=?", (intake.normalized_url,)
+            ).fetchone()
+            if duplicate:
+                raise typer.BadParameter(f"Duplicate job URL (existing id {duplicate['id']})")
+        job_id = save_posting(connection, intake)
+    typer.echo(
+        f"Added job with id {job_id}; complete={intake.complete}; warnings={intake.warnings}"
     )
-    if duplicate:
-        connection.close()
-        raise typer.BadParameter(f"Duplicate job URL (existing id {duplicate['id']})")
-    cursor = connection.execute(
-        """
-        INSERT INTO jobs
-          (source, company, title, location, remote_status, salary, url, ats_type,
-           description, required_qualifications, preferred_qualifications, responsibilities,
-           travel_requirement, date_discovered)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            job.source,
-            job.company,
-            job.title,
-            job.location,
-            job.remote_status,
-            job.salary,
-            job.url,
-            job.ats_type,
-            job.description,
-            json.dumps(job.required_qualifications),
-            json.dumps(job.preferred_qualifications),
-            json.dumps(job.responsibilities),
-            job.travel_requirement,
-            job.date_discovered,
-        ),
+
+
+@job_app.command("import")
+def job_import(csv_path: Path = typer.Option(..., "--csv", exists=True, dir_okay=False)) -> None:
+    with get_connection() as connection:
+        ids = import_csv(connection, csv_path)
+    typer.echo(f"Imported jobs: {ids}")
+
+
+@job_app.command("show")
+def job_show(job_id: int) -> None:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT jobs.*, job_postings.complete, job_postings.completeness_warnings,
+              job_postings.retrieval_method, job_postings.retrieved_at,
+              job_postings.normalized_fields
+            FROM jobs LEFT JOIN job_postings ON job_postings.job_id=jobs.id
+            WHERE jobs.id=?
+            """,
+            (job_id,),
+        ).fetchone()
+    if row is None:
+        raise typer.BadParameter(f"Unknown job id: {job_id}")
+    typer.echo(json.dumps(dict(row), indent=2, default=str))
+
+
+@job_app.command("analyze")
+def job_analyze(job_id: int) -> None:
+    with get_connection() as connection:
+        analysis = analyze_job(connection, job_id)
+    typer.echo(analysis.model_dump_json(indent=2))
+
+
+@resume_app.command("select")
+def resume_select(job_id: int) -> None:
+    with get_connection() as connection:
+        analysis = analyze_job(connection, job_id)
+    typer.echo(
+        json.dumps(
+            {
+                "selected_track": analysis.selected_track,
+                "confidence": analysis.track_confidence,
+                "reasons": analysis.route_reasons,
+                "conflicts": analysis.conflicting_signals,
+                "base_document": str(BASE_DOCUMENTS[analysis.selected_track]),
+                "human_review_required": True,
+            },
+            indent=2,
+        )
     )
-    connection.commit()
-    typer.echo(f"Added job with id {cursor.lastrowid}")
-    connection.close()
+
+
+@resume_app.command("tailor")
+def resume_tailor(job_id: int) -> None:
+    with get_connection() as connection:
+        version = tailor_resume(connection, job_id)
+    typer.echo(version.model_dump_json(indent=2))
+
+
+@resume_app.command("versions")
+def resume_versions(job_id: int) -> None:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, version, status, selected_track, docx_path, validation_status, created_at
+            FROM tailored_resumes WHERE job_id=? ORDER BY version
+            """,
+            (job_id,),
+        ).fetchall()
+    for row in rows:
+        typer.echo(dict(row))
+
+
+@resume_app.command("show")
+def resume_show(job_id: int, version_id: int) -> None:
+    with get_connection() as connection:
+        version = get_version(connection, job_id, version_id)
+    typer.echo(version.model_dump_json(indent=2))
+
+
+@resume_app.command("validate")
+def resume_validate(job_id: int) -> None:
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT id FROM tailored_resumes WHERE job_id=? ORDER BY version DESC LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            raise typer.BadParameter("No tailored resume exists")
+        version = get_version(connection, job_id, int(row["id"]))
+    typer.echo(Path(version.validation_path).read_text(encoding="utf-8"))
+
+
+@resume_app.command("approve")
+def resume_approve(job_id: int, version_id: int) -> None:
+    with get_connection() as connection:
+        version = set_version_status(connection, job_id, version_id, "approved")
+    typer.echo(f"Approved tailored resume {version.id}; upload is now permitted.")
+
+
+@resume_app.command("reject")
+def resume_reject(job_id: int, version_id: int) -> None:
+    with get_connection() as connection:
+        version = set_version_status(connection, job_id, version_id, "rejected")
+    typer.echo(f"Rejected tailored resume {version.id}.")
 
 
 def _job_from_row(row: sqlite3.Row) -> JobPost:

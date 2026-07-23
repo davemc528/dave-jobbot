@@ -132,7 +132,31 @@ def build_preflight(
     hostname = normalize_hostname(url)
     allowed = domain_is_allowed(hostname, real_site.allowed_domains)
     route = select_resume_track(str(row["title"] or ""), str(row["description"] or ""))
-    resume = approved_resume(route.selected_track, real_site)
+    from jobbot.resumes.tailoring import approved_resume_for_job
+
+    tailored_rows = connection.execute(
+        "SELECT count(*) FROM tailored_resumes WHERE job_id=?", (job_id,)
+    ).fetchone()[0]
+    tailored = approved_resume_for_job(connection, job_id)
+    if tailored:
+        resume = ResumeApproval(
+            track=tailored.selected_track,
+            path=tailored.docx_path,
+            exists=Path(tailored.docx_path).is_file(),
+            ignored_or_untracked=_path_is_ignored_or_untracked(Path(tailored.docx_path)),
+            approved=True,
+            explanation=(
+                f"Approved tailored resume version {tailored.version}; "
+                f"validation={tailored.validation_status}"
+            ),
+        )
+    elif tailored_rows:
+        resume = ResumeApproval(
+            track=route.selected_track,
+            explanation="A tailored resume exists but is not approved and valid",
+        )
+    else:
+        resume = approved_resume(route.selected_track, real_site)
     profile = resolve_effective_profile(connection).readiness
     pending = connection.execute(
         """

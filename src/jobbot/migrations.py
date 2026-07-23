@@ -6,6 +6,7 @@ PHASE_15_MIGRATION = "001_phase_1_5_profile_verification"
 PHASE_16_MIGRATION = "002_phase_1_6_verified_application_answers"
 PHASE_16_STATE_FIX = "003_phase_1_6_answer_state_fix"
 CANONICAL_SUPERSESSION_MIGRATION = "004_canonical_fact_supersession"
+PHASE_II_A_MIGRATION = "005_phase_2a_job_resume_tailoring"
 
 
 def record_phase_15_migration(connection: sqlite3.Connection) -> None:
@@ -45,4 +46,11 @@ def record_canonical_supersession_migration(connection: sqlite3.Connection) -> N
     connection.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, datetime('now'))",
         (CANONICAL_SUPERSESSION_MIGRATION,),
+    )
+
+
+def record_phase_2a_migration(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, datetime('now'))",
+        (PHASE_II_A_MIGRATION,),
     )
