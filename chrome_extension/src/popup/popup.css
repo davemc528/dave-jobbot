@@ -26,4 +26,8 @@ button:hover, button:focus-visible { border-color: #2d63d7; outline: 2px solid #
 .primary { background: #245ac7; color: white; border-color: #245ac7; }
 .danger { color: #9a281f; border-color: #e2aaa5; }
 details { margin-top: 10px; font-size: 12px; }
+pre { max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 10px; }
+#short-actions { display: grid; gap: 6px; margin-top: 8px; }
+#extraction-preview { max-height: 180px; overflow: auto; white-space: pre-wrap; }
+button:disabled { cursor: wait; opacity: .6; }
 [hidden] { display: none !important; }

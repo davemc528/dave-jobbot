@@ -150,13 +150,16 @@ function extractionAttempts(
       candidate.method === "user-selection" &&
       candidate.text.length >= PREFERRED_TEXT_LENGTH
   );
-  const best =
-    preferred ??
-    [...candidates].sort((a, b) => {
+  const ranked = [...candidates].sort((a, b) => {
       const sufficientA = Number(a.text.length >= PREFERRED_TEXT_LENGTH);
       const sufficientB = Number(b.text.length >= PREFERRED_TEXT_LENGTH);
       return sufficientB - sufficientA || b.confidence - a.confidence || b.text.length - a.text.length;
-    })[0];
+    });
+  const best =
+    preferred ??
+    ranked.find((candidate) => candidate.text.length >= PREFERRED_TEXT_LENGTH) ??
+    candidates.find((candidate) => candidate.method === "full-visible-body-review") ??
+    ranked[0]!;
   return { best, jsonLd, attempts };
 }
 

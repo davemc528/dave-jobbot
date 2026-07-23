@@ -1,16 +1,26 @@
 import { BRIDGE, STORAGE_KEYS } from "../shared/messages";
+import { FreshCaptureLifecycle, TRANSIENT_CAPTURE_KEYS } from "../shared/capture";
 import { exactHostname } from "../shared/urls";
-import { CapturePayload, FillInstruction } from "../shared/types";
+import {
+  CapturePayload,
+  CaptureResult,
+  ExtractionDiagnostics,
+  FillInstruction
+} from "../shared/types";
 
 interface PopupState {
   jobId?: number;
   resumeId?: number;
   hostname?: string;
   capture?: CapturePayload;
+  captureId?: string;
+  diagnostics?: ExtractionDiagnostics;
+  capturePending: boolean;
   withheld: Array<{ identifier: string; reason: string }>;
 }
 
-const state: PopupState = { withheld: [] };
+const state: PopupState = { withheld: [], capturePending: false };
+const captureLifecycle = new FreshCaptureLifecycle();
 const element = <T extends HTMLElement>(id: string): T => {
   const value = document.getElementById(id);
   if (!value) throw new Error(`Missing popup element: ${id}`);
@@ -82,20 +92,22 @@ async function checkBridge(): Promise<void> {
   }
 }
 
-async function capture(): Promise<void> {
-  const tab = await activeTab();
-  const hostname = exactHostname(tab.url!);
-  text("page-title", tab.title);
-  text("hostname", hostname);
-  if (!(await ensureHostApproved(hostname))) return;
-  const response = await sendToTab("extract", { tabKey: String(tab.id) });
-  if (response.error) throw new Error(String(response.error));
-  const payload = (response.payload as CapturePayload);
-  state.capture = payload;
-  if (payload.extraction_confidence < 0.6) {
-    message(`Low-confidence preview (${payload.full_text.slice(0, 500)}…). Click again after selecting the posting text.`);
-    return;
-  }
+function setCaptureBusy(busy: boolean): void {
+  state.capturePending = busy;
+  element<HTMLButtonElement>("capture").disabled = busy;
+  element<HTMLButtonElement>("refresh").disabled = busy;
+  element<HTMLButtonElement>("capture-again").disabled = busy;
+  element<HTMLButtonElement>("use-selection").disabled = busy;
+}
+
+function renderDiagnostics(diagnostics: ExtractionDiagnostics): void {
+  state.diagnostics = diagnostics;
+  element("diagnostics-output").textContent = JSON.stringify(diagnostics, null, 2);
+}
+
+async function saveCapture(payload: CapturePayload): Promise<void> {
+  message("Analyzing job");
+  text("stage", "Analyzing job");
   const result = await api<{
     job_id: number;
     existing: boolean;
@@ -103,8 +115,17 @@ async function capture(): Promise<void> {
     analysis: { overall_score: number; selected_track: string };
   }>("/jobs/capture", { method: "POST", body: JSON.stringify(payload) });
   state.jobId = result.job_id;
+  const tab = await activeTab();
+  const stored = await chrome.storage.local.get(STORAGE_KEYS.tabs);
+  const associations = (stored[STORAGE_KEYS.tabs] ?? {}) as Record<string, unknown>;
   await chrome.storage.local.set({
-    [STORAGE_KEYS.tabs]: { [String(tab.id)]: { jobId: result.job_id, hostname } }
+    [STORAGE_KEYS.tabs]: {
+      ...associations,
+      [String(tab.id)]: { jobId: result.job_id, hostname: payload.hostname }
+    },
+    [STORAGE_KEYS.lastCapturePayload]: payload,
+    [STORAGE_KEYS.extractionConfidence]: payload.extraction_confidence,
+    [STORAGE_KEYS.capturedAt]: payload.captured_at
   });
   text("employer", payload.employer);
   text("job-title", payload.job_title);
@@ -114,7 +135,92 @@ async function capture(): Promise<void> {
   text("fit-score", result.analysis.overall_score);
   text("resume-state", result.analysis.selected_track);
   text("stage", "Analysis ready");
-  message(result.message);
+  element<HTMLButtonElement>("capture").textContent = "Capture Again and Reanalyze";
+  message(
+    result.existing
+      ? `Existing job refreshed: Job ID ${result.job_id}`
+      : `New job created: Job ID ${result.job_id}`
+  );
+}
+
+async function capture(saveLowConfidence = false): Promise<void> {
+  if (state.capturePending) return;
+  setCaptureBusy(true);
+  const pendingRequest = captureLifecycle.begin("pending");
+  const captureId = pendingRequest.capture_id;
+  state.captureId = captureId;
+  state.capture = undefined;
+  state.diagnostics = undefined;
+  await chrome.storage.local.remove([...TRANSIENT_CAPTURE_KEYS]);
+  text("capture-id", captureId);
+  text("capture-time", new Date().toISOString());
+  element("short-actions").hidden = true;
+  element("extraction-preview").textContent = "";
+  message("Reading current page");
+  text("stage", "Reading current page");
+  try {
+  const tab = await activeTab();
+  const hostname = exactHostname(tab.url!);
+  text("page-title", tab.title);
+  text("hostname", hostname);
+  if (!(await ensureHostApproved(hostname))) return;
+  message("Waiting for job content");
+  text("stage", "Waiting for job content");
+  const started = performance.now();
+  const response = await sendToTab("capture_current_page", {
+    ...pendingRequest,
+    tabKey: String(tab.id)
+  });
+  if (state.captureId !== captureId) return;
+  if (response.error) throw new Error(String(response.error));
+  const result = response as unknown as CaptureResult;
+  if (result.capture_id !== captureId) throw new Error("Stale capture response ignored");
+  renderDiagnostics(result.diagnostics);
+  message("Extracting rendered posting");
+  text("stage", "Extracting rendered posting");
+  const payload = result.payload;
+  console.debug("Dave Jobbot fresh capture", {
+    capture_id: captureId,
+    tab_id: tab.id,
+    url: result.diagnostics.url,
+    extraction_method: payload?.extraction_method,
+    text_length: payload?.full_text.length ?? 0,
+    confidence: payload?.extraction_confidence,
+    duration_ms: Math.round(performance.now() - started),
+    stabilization_timeout: result.diagnostics.stabilization_timed_out,
+    error_category: payload ? undefined : "short_content"
+  });
+  if (!payload) {
+    element("short-actions").hidden = false;
+    text("stage", "No job detected");
+    message("Rendered content is still too short. Review Capture Diagnostics and retry.");
+    return;
+  }
+  state.capture = payload;
+  text("extraction-method", payload.extraction_method);
+  text("text-length", payload.full_text.length);
+  text("capture-confidence", payload.extraction_confidence.toFixed(2));
+  text("capture-time", payload.captured_at);
+  if ((result.short_content || payload.requires_human_review) && !saveLowConfidence) {
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.extractionPreview]: payload.full_text,
+      [STORAGE_KEYS.lastCapturePayload]: payload
+    });
+    element("short-actions").hidden = false;
+    element("extraction-preview").textContent = payload.full_text.slice(0, 2_000);
+    message("Low-confidence capture requires review before it can be saved.");
+    return;
+  }
+  await saveCapture(payload);
+  } catch (error) {
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.lastCaptureError]:
+        error instanceof Error ? error.message : "capture_failed"
+    });
+    throw error;
+  } finally {
+    if (captureLifecycle.finish(captureId)) setCaptureBusy(false);
+  }
 }
 
 async function tailor(): Promise<void> {
@@ -241,6 +347,30 @@ bind("allow-host", async () => {
 });
 bind("capture", capture);
 bind("refresh", capture);
+bind("capture-again", capture);
+bind("use-selection", capture);
+bind("preview-visible", () => {
+  element("extraction-preview").textContent =
+    state.capture?.full_text ??
+    `Visible body length: ${state.diagnostics?.visible_body_text_length ?? 0}`;
+});
+bind("save-low-confidence", async () => {
+  if (!state.capture) throw new Error("No usable low-confidence capture is available");
+  if (!confirm("Save this low-confidence capture for required human review?")) return;
+  await saveCapture({
+    ...state.capture,
+    requires_human_review: true,
+    extraction_confidence: Math.min(state.capture.extraction_confidence, 0.35)
+  });
+});
+bind("cancel-capture", async () => {
+  captureLifecycle.cancel();
+  state.captureId = undefined;
+  setCaptureBusy(false);
+  await sendToTab("stop");
+  text("stage", "Capture cancelled");
+  message("Capture cancelled. Existing job and pairing state were preserved.");
+});
 bind("tailor", tailor);
 bind("approve", approveResume);
 bind("fill", () => discoverAndFill(true));

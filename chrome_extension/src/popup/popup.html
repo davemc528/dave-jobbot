@@ -31,6 +31,11 @@
         <div><dt>Role</dt><dd id="job-title">—</dd></div>
         <div><dt>Location</dt><dd id="location">—</dd></div>
         <div><dt>ATS</dt><dd id="ats">—</dd></div>
+        <div><dt>Method</dt><dd id="extraction-method">—</dd></div>
+        <div><dt>Text</dt><dd id="text-length">—</dd></div>
+        <div><dt>Confidence</dt><dd id="capture-confidence">—</dd></div>
+        <div><dt>Captured</dt><dd id="capture-time">—</dd></div>
+        <div><dt>Capture ID</dt><dd id="capture-id">—</dd></div>
         <div><dt>Job ID</dt><dd id="job-id">—</dd></div>
         <div><dt>Fit</dt><dd id="fit-score">—</dd></div>
         <div><dt>Resume</dt><dd id="resume-state">—</dd></div>
@@ -45,6 +50,18 @@
       <details id="withheld">
         <summary>Withheld fields</summary>
         <ul id="withheld-list"></ul>
+      </details>
+      <details id="capture-diagnostics">
+        <summary>Capture Diagnostics</summary>
+        <pre id="diagnostics-output">No capture diagnostics yet.</pre>
+        <div id="short-actions" hidden>
+          <button id="capture-again">Capture Again</button>
+          <button id="use-selection">Use Selected Text</button>
+          <button id="preview-visible">Preview Visible Page Text</button>
+          <button id="save-low-confidence">Save as Low-Confidence Capture</button>
+          <button id="cancel-capture">Cancel</button>
+        </div>
+        <p id="extraction-preview"></p>
       </details>
     </section>
 

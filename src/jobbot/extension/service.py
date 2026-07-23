@@ -27,6 +27,7 @@ def digest(value: str) -> str:
 
 
 class CapturePayload(BaseModel):
+    capture_id: str | None = Field(default=None, min_length=16, max_length=128)
     tab_key: str = Field(min_length=1, max_length=128)
     current_url: str
     canonical_url: str | None = None
@@ -49,6 +50,8 @@ class CapturePayload(BaseModel):
     page_title: str
     json_ld: dict[str, object] | None = None
     captured_at: str
+    requires_human_review: bool = False
+    stabilization_timed_out: bool = False
 
 
 class FieldInventory(BaseModel):
@@ -263,6 +266,8 @@ def capture_job(
         existing = True
     if payload.application_url:
         update_application_url(connection, job_id, payload.application_url)
+    if payload.requires_human_review:
+        connection.execute("UPDATE jobs SET status='needs_review' WHERE id=?", (job_id,))
     connection.execute(
         """
         INSERT INTO extension_job_snapshots

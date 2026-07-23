@@ -131,6 +131,43 @@ def test_capture_deduplicates_and_exact_hostname_is_independently_checked(
     assert rejected.status_code == 403
 
 
+def test_low_confidence_refresh_versions_existing_job_and_marks_review(
+    bridge: tuple[TestClient, sqlite3.Connection, str],
+) -> None:
+    client, connection, token = bridge
+    approve_hostname(connection, "jobs.example.test", 1)
+    first_payload = capture_payload()
+    first_payload["capture_id"] = "capture-first-version"
+    first = client.post("/api/v1/jobs/capture", json=first_payload, headers=auth(token)).json()
+    refreshed_payload = capture_payload()
+    refreshed_payload.update(
+        {
+            "capture_id": "capture-second-version",
+            "requires_human_review": True,
+            "extraction_confidence": 0.2,
+        }
+    )
+    refreshed = client.post(
+        "/api/v1/jobs/capture", json=refreshed_payload, headers=auth(token)
+    ).json()
+    assert refreshed["existing"] is True
+    assert refreshed["job_id"] == first["job_id"]
+    assert connection.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+    assert (
+        connection.execute(
+            "SELECT count(*) FROM extension_job_snapshots WHERE job_id=?",
+            (first["job_id"],),
+        ).fetchone()[0]
+        == 2
+    )
+    assert (
+        connection.execute("SELECT status FROM jobs WHERE id=?", (first["job_id"],)).fetchone()[
+            "status"
+        ]
+        == "needs_review"
+    )
+
+
 def test_application_plan_withholds_password_and_terminal_fields(
     bridge: tuple[TestClient, sqlite3.Connection, str],
 ) -> None:
