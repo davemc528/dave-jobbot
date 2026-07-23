@@ -56,14 +56,28 @@ LOCAL_AUTOMATION_CONFIG = BASE_DIR / "config" / "automation.local.yaml"
 
 
 def load_runtime_config(path: Path | None = None) -> RuntimeConfig:
-    target = path or LOCAL_AUTOMATION_CONFIG
+    """Load effective runtime configuration without mutating global state.
+
+    An explicit path takes precedence, followed by JOBBOT_AUTOMATION_CONFIG,
+    then the ignored local configuration file.
+    """
+    configured_path = os.getenv("JOBBOT_AUTOMATION_CONFIG")
+    target = path or (Path(configured_path) if configured_path else LOCAL_AUTOMATION_CONFIG)
     if not target.is_file():
         return RuntimeConfig()
     content = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
     return RuntimeConfig.model_validate(content)
 
 
-RUNTIME = load_runtime_config()
+def get_runtime_config(path: Path | None = None) -> RuntimeConfig:
+    """Return configuration resolved from current local and environment settings."""
+    return load_runtime_config(path)
+
+
+RUNTIME = get_runtime_config()
+# Compatibility snapshots for existing browser and CLI call sites. New UI code
+# should use get_runtime_config() so tests and environment overrides are resolved
+# at the time configuration is displayed.
 AUTOMATION = RUNTIME.automation
 REAL_SITE = RUNTIME.real_site
 

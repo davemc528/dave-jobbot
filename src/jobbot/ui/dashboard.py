@@ -8,7 +8,7 @@ from pathlib import Path
 import streamlit as st
 
 from jobbot.db import get_connection
-from jobbot.config import AUTOMATION, resolve_db_path
+from jobbot.config import get_runtime_config, resolve_db_path
 from jobbot.profile.application_answers import (
     effective_answer_state,
     list_answers,
@@ -70,6 +70,20 @@ INTAKE_TO_ANSWER = {
     "noncompete": "noncompete_restriction",
     "eeo_answers": "eeo_decline",
 }
+
+
+def dashboard_runtime_status() -> dict[str, object]:
+    """Return the effective, read-only automation status shown by Streamlit."""
+    automation = get_runtime_config().automation
+    return {
+        "automatic_dry_run_enabled": automation.enabled,
+        "configured_mode": automation.mode,
+        "final_submit_enabled": automation.final_submit_enabled,
+        "captcha_policy": automation.captcha_policy,
+        "visible_browser": automation.visible_browser,
+        "confidence_threshold": automation.minimum_autofill_confidence,
+        "stop_before_submit": automation.stop_before_submit,
+    }
 
 
 def _tier(category: str) -> int:
@@ -566,17 +580,7 @@ def _application_answers_page() -> None:
 
     st.header("Automation Readiness")
     _render_readiness(profile.readiness)
-    st.write(
-        {
-            "automatic_dry_run_enabled": AUTOMATION.enabled,
-            "configured_mode": AUTOMATION.mode,
-            "final_submit_enabled": AUTOMATION.final_submit_enabled,
-            "captcha_policy": AUTOMATION.captcha_policy,
-            "visible_browser": AUTOMATION.visible_browser,
-            "confidence_threshold": AUTOMATION.minimum_autofill_confidence,
-            "stop_before_submit": AUTOMATION.stop_before_submit,
-        }
-    )
+    st.write(dashboard_runtime_status())
     blockers = connection.execute(
         "SELECT count(*) FROM review_items WHERE status='pending'"
     ).fetchone()[0]
@@ -613,4 +617,5 @@ def launch_dashboard() -> None:
         _extension_page()
 
 
-launch_dashboard()
+if __name__ == "__main__":
+    launch_dashboard()
