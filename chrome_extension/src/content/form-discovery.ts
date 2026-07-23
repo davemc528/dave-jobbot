@@ -56,12 +56,13 @@ export function discoverFields(document: Document): FieldInventory[] {
         required: input.required || element.getAttribute("aria-required") === "true",
         has_value: inputType === "password" ? Boolean(input.value) : Boolean(input.value),
         options:
-          element instanceof HTMLSelectElement
-            ? [...element.options].map((option) => option.text)
+          element.tagName.toLowerCase() === "select"
+            ? [...(element as HTMLSelectElement).options].map((option) => option.text)
             : [],
         section_heading: section?.textContent?.trim(),
-        page_url: location.href,
-        frame_identifier: window === window.top ? "top" : "child",
+        page_url: document.location.href,
+        frame_identifier:
+          document.defaultView === document.defaultView?.top ? "top" : "child",
         terminal: isTerminalLabel(label),
         sensitive
       });

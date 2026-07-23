@@ -167,9 +167,7 @@ def host_revoke(payload: HostRequest, _token: TokenId, connection: Connection) -
 
 
 @app.post("/api/v1/session/revoke")
-def session_revoke(
-    token: TokenId, connection: Connection
-) -> dict[str, str]:
+def session_revoke(token: TokenId, connection: Connection) -> dict[str, str]:
     connection.execute(
         "UPDATE extension_tokens SET revoked_at=datetime('now') WHERE id=?", (token,)
     )

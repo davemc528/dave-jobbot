@@ -1,9 +1,11 @@
 import { FillInstruction } from "../shared/types";
 
 function events(element: HTMLElement): void {
-  element.dispatchEvent(new Event("input", { bubbles: true }));
-  element.dispatchEvent(new Event("change", { bubbles: true }));
-  element.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+  const view = element.ownerDocument.defaultView;
+  if (!view) return;
+  element.dispatchEvent(new view.Event("input", { bubbles: true }));
+  element.dispatchEvent(new view.Event("change", { bubbles: true }));
+  element.dispatchEvent(new view.FocusEvent("blur", { bubbles: true }));
 }
 
 export function fillFields(
@@ -29,7 +31,9 @@ export function fillFields(
       withheld.push({ identifier: instruction.field_identifier, reason: "field_not_found" });
       continue;
     }
-    if (element instanceof HTMLInputElement && element.type === "file") {
+    const tagName = element.tagName.toLowerCase();
+    const input = tagName === "input" ? (element as HTMLInputElement) : null;
+    if (input?.type === "file") {
       element.style.outline = "3px solid #ef6c00";
       withheld.push({
         identifier: instruction.field_identifier,
@@ -38,33 +42,31 @@ export function fillFields(
       continue;
     }
     if (
-      element instanceof HTMLInputElement &&
-      ["password", "hidden"].includes(element.type)
+      input &&
+      ["password", "hidden"].includes(input.type)
     ) {
       withheld.push({ identifier: instruction.field_identifier, reason: "sensitive_field" });
       continue;
     }
-    if (element instanceof HTMLSelectElement) {
-      const option = [...element.options].find(
+    if (tagName === "select") {
+      const select = element as HTMLSelectElement;
+      const option = [...select.options].find(
         (item) => item.text.trim().toLowerCase() === instruction.proposed_value?.toLowerCase()
       );
       if (!option) {
         withheld.push({ identifier: instruction.field_identifier, reason: "option_not_found" });
         continue;
       }
-      element.value = option.value;
+      select.value = option.value;
     } else if (
-      element instanceof HTMLInputElement &&
-      ["checkbox", "radio"].includes(element.type)
+      input &&
+      ["checkbox", "radio"].includes(input.type)
     ) {
-      element.checked = ["yes", "true", "1", "on"].includes(
+      input.checked = ["yes", "true", "1", "on"].includes(
         instruction.proposed_value.toLowerCase()
       );
-    } else if (
-      element instanceof HTMLInputElement ||
-      element instanceof HTMLTextAreaElement
-    ) {
-      element.value = instruction.proposed_value;
+    } else if (input || tagName === "textarea") {
+      (element as HTMLInputElement | HTMLTextAreaElement).value = instruction.proposed_value;
     } else if (element.getAttribute("role") === "combobox") {
       element.focus();
       element.setAttribute("aria-valuetext", instruction.proposed_value);
