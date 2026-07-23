@@ -50,6 +50,37 @@ export function responseMatchesCapture(
   );
 }
 
+export function selectTopFrameCaptureResult(
+  results: Array<{ frameId: number; result?: unknown }>,
+  captureId: string
+): Record<string, unknown> {
+  const topFrame = results.find((entry) => entry.frameId === 0) ?? results[0];
+  if (!topFrame || typeof topFrame.result !== "object" || topFrame.result === null) {
+    return {
+      ok: false,
+      captureId,
+      stage: "capture_failed",
+      error: {
+        code: "missing_content_script_response",
+        message: "The injected capture entrypoint returned no result."
+      }
+    };
+  }
+  const response = topFrame.result as Record<string, unknown>;
+  if (!responseMatchesCapture(captureId, response.captureId)) {
+    return {
+      ok: false,
+      captureId,
+      stage: "capture_failed",
+      error: {
+        code: "stale_capture_response",
+        message: "The injected capture result did not match the active capture."
+      }
+    };
+  }
+  return response;
+}
+
 export class FreshCaptureLifecycle {
   currentCaptureId?: string;
   busy = false;

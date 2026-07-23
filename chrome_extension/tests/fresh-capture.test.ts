@@ -3,6 +3,7 @@ import {
   FreshCaptureLifecycle,
   newCaptureRequest,
   responseMatchesCapture,
+  selectTopFrameCaptureResult,
   TRANSIENT_CAPTURE_KEYS
 } from "../src/shared/capture";
 import { waitForRenderedContent } from "../src/content/stabilization";
@@ -26,6 +27,35 @@ describe("fresh capture lifecycle", () => {
   it("rejects stale responses", () => {
     expect(responseMatchesCapture("new-id", "old-id")).toBe(false);
     expect(responseMatchesCapture("new-id", "new-id")).toBe(true);
+  });
+
+  it("selects the serialized top-frame executeScript result", () => {
+    const response = selectTopFrameCaptureResult(
+      [
+        {
+          frameId: 0,
+          result: { ok: true, captureId: "current-id", result: { full_text: "job" } }
+        }
+      ],
+      "current-id"
+    );
+    expect(response.ok).toBe(true);
+  });
+
+  it("turns empty and stale executeScript results into structured failures", () => {
+    const missing = selectTopFrameCaptureResult([], "current-id");
+    expect(missing).toMatchObject({
+      ok: false,
+      error: { code: "missing_content_script_response" }
+    });
+    const stale = selectTopFrameCaptureResult(
+      [{ frameId: 0, result: { ok: true, captureId: "old-id" } }],
+      "current-id"
+    );
+    expect(stale).toMatchObject({
+      ok: false,
+      error: { code: "stale_capture_response" }
+    });
   });
 
   it("re-enables capture after failure and permits retry on the same tab", () => {

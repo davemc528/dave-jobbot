@@ -1,5 +1,8 @@
 import { isExtensionMessage } from "./shared/schemas";
-import { responseMatchesCapture } from "./shared/capture";
+import {
+  responseMatchesCapture,
+  selectTopFrameCaptureResult
+} from "./shared/capture";
 import { withDeadline } from "./shared/timeouts";
 
 const activeCaptures = new Map<number, string>();
@@ -28,19 +31,77 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
     if (typeof captureId === "string") activeCaptures.set(tab.id, captureId);
     await withDeadline(
       chrome.scripting.executeScript({
-        target: { tabId: tab.id },
+        target: { tabId: tab.id, allFrames: false },
         files: ["content.js"]
       }),
       3_000,
       "content_injection_timeout",
       "The content script could not be injected before its deadline."
     );
-    const response = await withDeadline(
-      chrome.tabs.sendMessage(tab.id, message),
-      12_000,
-      "extension_message_timeout",
-      "The page did not return a capture response in time."
-    );
+    let response: Record<string, unknown>;
+    if (typeof captureId === "string") {
+      const results = await withDeadline(
+        chrome.scripting.executeScript({
+          target: { tabId: tab.id, allFrames: false },
+          func: async (request: unknown) => {
+          const captureGlobal = globalThis as typeof globalThis & {
+            __daveJobbotRunFreshCapture?: (
+              value: unknown
+            ) => Promise<Record<string, unknown>>;
+          };
+          if (typeof captureGlobal.__daveJobbotRunFreshCapture !== "function") {
+            return {
+              ok: false,
+              captureId:
+                typeof request === "object" &&
+                request !== null &&
+                "capture_id" in request
+                  ? String(request.capture_id)
+                  : "unknown",
+              stage: "capture_failed",
+              error: {
+                code: "capture_entrypoint_missing",
+                message: "The injected capture entrypoint was not available."
+              }
+            };
+          }
+          try {
+            return await captureGlobal.__daveJobbotRunFreshCapture(request);
+          } catch (error) {
+            return {
+              ok: false,
+              captureId:
+                typeof request === "object" &&
+                request !== null &&
+                "capture_id" in request
+                  ? String(request.capture_id)
+                  : "unknown",
+              stage: "capture_failed",
+              error: {
+                code: "content_capture_failed",
+                message:
+                  error instanceof Error
+                    ? error.message
+                    : "Unknown content capture failure"
+              }
+            };
+          }
+          },
+          args: [message.payload]
+        }),
+        12_000,
+        "content_capture_timeout",
+        "The injected page capture did not return a result in time."
+      );
+      response = selectTopFrameCaptureResult(results, captureId);
+    } else {
+      response = await withDeadline(
+        chrome.tabs.sendMessage(tab.id, message),
+        12_000,
+        "extension_message_timeout",
+        "The page did not return a response in time."
+      );
+    }
     if (
       typeof captureId === "string" &&
       (!responseMatchesCapture(activeCaptures.get(tab.id), captureId) ||
