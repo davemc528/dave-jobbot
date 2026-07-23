@@ -310,6 +310,23 @@ def update_fact(
     )
     after = get_canonical_fact(connection, fact_id)
     _audit(connection, fact_id, action, before.model_dump(), after.model_dump(), notes)
+    if status == "verified":
+        for old_id in after.supersedes:
+            old = get_canonical_fact(connection, old_id)
+            connection.execute(
+                """
+                UPDATE canonical_facts SET review_notes = ?, autofill_permission = 0,
+                  updated_at = ? WHERE id = ?
+                """,
+                (f"Superseded by canonical fact {fact_id}", utc_now(), old_id),
+            )
+            _audit(
+                connection,
+                old_id,
+                "superseded",
+                old.model_dump(),
+                {"superseded_by": fact_id},
+            )
     connection.commit()
     return after
 
@@ -467,13 +484,25 @@ def seed_phase_15_proposals(connection: sqlite3.Connection) -> list[int]:
         )
     ]
     for fact_id in duration_ids + publication_status_ids:
+        sibling_ids = duration_ids if fact_id in duration_ids else publication_status_ids
+        sibling_values = [
+            str(row["canonical_value"])
+            for row in connection.execute(
+                f"""
+                SELECT canonical_value FROM canonical_facts
+                WHERE id IN ({",".join("?" for _ in sibling_ids)}) AND id != ?
+                """,  # noqa: S608 - placeholders only
+                (*sibling_ids, fact_id),
+            )
+        ]
         connection.execute(
             """
             UPDATE canonical_facts
-            SET verification_status = 'conflicted', autofill_permission = 0, updated_at = ?
+            SET verification_status = 'conflicted', autofill_permission = 0,
+              conflicting_values = ?, updated_at = ?
             WHERE id = ? AND review_notes NOT LIKE 'Superseded by canonical fact%'
             """,
-            (utc_now(), fact_id),
+            (json.dumps(sibling_values), utc_now(), fact_id),
         )
     ids = [
         _create_proposed_fact(
@@ -555,28 +584,12 @@ def seed_phase_15_proposals(connection: sqlite3.Connection) -> list[int]:
 
 
 def approve_and_supersede(connection: sqlite3.Connection, fact_id: int) -> CanonicalFact:
-    fact = update_fact(connection, fact_id, action="approve")
-    for old_id in fact.supersedes:
-        old = get_canonical_fact(connection, old_id)
-        connection.execute(
-            """
-            UPDATE canonical_facts SET review_notes = ?, autofill_permission = 0,
-              updated_at = ? WHERE id = ?
-            """,
-            (f"Superseded by canonical fact {fact_id}", utc_now(), old_id),
-        )
-        _audit(
-            connection,
-            old_id,
-            "superseded",
-            old.model_dump(),
-            {"superseded_by": fact_id},
-        )
-    connection.commit()
-    return fact
+    return update_fact(connection, fact_id, action="approve")
 
 
 INTAKE_FIELDS: dict[str, tuple[str, bool]] = {
+    "email": ("ordinary", False),
+    "phone": ("ordinary", False),
     "linkedin_url": ("ordinary", False),
     "preferred_name": ("ordinary", False),
     "current_city_state": ("ordinary", False),
@@ -681,9 +694,18 @@ def profile_readiness(connection: sqlite3.Connection) -> ReadinessReport:
     failures: list[str] = []
     if not verified("identity", {"name"}):
         failures.append("Name is not verified")
-    if not (
-        verified("contact_information", {"email"}) and verified("contact_information", {"phone"})
-    ):
+    verified_contact = {
+        row["field_name"]
+        for row in connection.execute(
+            """
+            SELECT field_name FROM profile_intake
+            WHERE field_name IN ('email', 'phone') AND verification_status = 'verified'
+            """
+        )
+    }
+    email_verified = verified("contact_information", {"email"}) or "email" in verified_contact
+    phone_verified = verified("contact_information", {"phone"}) or "phone" in verified_contact
+    if not (email_verified and phone_verified):
         failures.append("Email and phone are not verified")
     contact = connection.execute(
         """

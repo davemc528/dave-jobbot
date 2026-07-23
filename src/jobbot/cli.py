@@ -63,7 +63,60 @@ def import_documents() -> None:
         text = extract_text(path)
         checksum = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
         analysis = extract_candidate_facts(path.name, text)
-        connection.execute("DELETE FROM candidate_facts WHERE source = ?", (path.name,))
+        existing_rows = connection.execute(
+            """
+            SELECT id, category, field_name, value
+            FROM candidate_facts WHERE source = ? ORDER BY id
+            """,
+            (path.name,),
+        ).fetchall()
+        existing: dict[tuple[str, str, str], list[int]] = {}
+        for row in existing_rows:
+            key = (str(row["category"]), str(row["field_name"]), str(row["value"] or ""))
+            existing.setdefault(key, []).append(int(row["id"]))
+        retained_ids: set[int] = set()
+        for fact in analysis.facts:
+            key = (fact.category, fact.field_name, str(fact.value or ""))
+            matched_ids = existing.get(key, [])
+            if matched_ids:
+                raw_id = matched_ids.pop(0)
+                retained_ids.add(raw_id)
+                connection.execute(
+                    """
+                    UPDATE candidate_facts SET verified = 0, notes = ?
+                    WHERE id = ?
+                    """,
+                    (fact.notes, raw_id),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO candidate_facts
+                      (category, field_name, value, verified, source, notes)
+                    VALUES (?, ?, ?, 0, ?, ?)
+                    """,
+                    (fact.category, fact.field_name, fact.value, fact.source, fact.notes),
+                )
+                if cursor.lastrowid is not None:
+                    retained_ids.add(int(cursor.lastrowid))
+        for row in existing_rows:
+            raw_id = int(row["id"])
+            if raw_id in retained_ids:
+                continue
+            referenced = connection.execute(
+                "SELECT 1 FROM canonical_fact_sources WHERE raw_fact_id = ?", (raw_id,)
+            ).fetchone()
+            if referenced:
+                connection.execute(
+                    """
+                    UPDATE candidate_facts SET notes =
+                      'No longer present in latest extraction; retained for canonical provenance'
+                    WHERE id = ?
+                    """,
+                    (raw_id,),
+                )
+            else:
+                connection.execute("DELETE FROM candidate_facts WHERE id = ?", (raw_id,))
         connection.execute("DELETE FROM documents WHERE filename = ?", (path.name,))
         connection.execute(
             """
@@ -85,17 +138,6 @@ def import_documents() -> None:
                 ),
                 checksum,
             ),
-        )
-        connection.executemany(
-            """
-            INSERT INTO candidate_facts
-              (category, field_name, value, verified, source, notes)
-            VALUES (?, ?, ?, 0, ?, ?)
-            """,
-            [
-                (fact.category, fact.field_name, fact.value, fact.source, fact.notes)
-                for fact in analysis.facts
-            ],
         )
         connection.execute(
             "DELETE FROM review_items WHERE item_type = 'document_facts' AND summary LIKE ?",

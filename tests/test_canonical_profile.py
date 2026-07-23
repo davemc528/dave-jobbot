@@ -5,6 +5,7 @@ import pytest
 
 from jobbot.browser.playwright_mvp import verified_mock_autofill
 from jobbot.db import initialize_schema
+from jobbot.llm.provider import OpenAICompatibleProvider
 from jobbot.profile.canonical import (
     CanonicalFact,
     _insert_fact,
@@ -124,7 +125,12 @@ def test_duration_publication_superseding_and_restricted_patent() -> None:
 
 def test_sensitive_intake_is_not_stored_and_non_inference_is_enforced() -> None:
     connection = database()
-    for field in ("work_authorization", "minimum_compensation"):
+    for field in (
+        "work_authorization",
+        "sponsorship_requirement",
+        "minimum_compensation",
+        "eeo_answers",
+    ):
         with pytest.raises(RuntimeError):
             save_intake_answer(
                 connection,
@@ -140,6 +146,46 @@ def test_sensitive_intake_is_not_stored_and_non_inference_is_enforced() -> None:
     ).fetchone()
     assert row["value"] is None
     assert row["manual_only"] == 1
+    mark_sensitive_manual_only(connection, "eeo_answers")
+    eeo = connection.execute(
+        "SELECT value, manual_only, autofill_permission FROM profile_intake "
+        "WHERE field_name='eeo_answers'"
+    ).fetchone()
+    assert eeo["value"] is None
+    assert eeo["manual_only"] == 1
+    assert eeo["autofill_permission"] == 0
+
+
+def test_external_llm_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JOBBOT_ALLOW_REMOTE_LLM", raising=False)
+    provider = OpenAICompatibleProvider(api_key="not-a-real-key")
+    with pytest.raises(RuntimeError, match="Remote LLM use is disabled"):
+        provider.generate("Do not send this")
+
+
+def test_phase_15_migration_upgrades_existing_database() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        "CREATE TABLE candidate_facts "
+        "(id INTEGER PRIMARY KEY, category TEXT, field_name TEXT, value TEXT, "
+        "verified INTEGER, source TEXT, notes TEXT)"
+    )
+    initialize_schema(connection)
+    version = connection.execute(
+        "SELECT version FROM schema_migrations WHERE version='001_phase_1_5_profile_verification'"
+    ).fetchone()
+    assert version is not None
+    for table in (
+        "canonical_facts",
+        "canonical_fact_sources",
+        "profile_audit_log",
+        "profile_intake",
+    ):
+        found = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        assert found is not None
 
 
 def add_verified_fact(connection: sqlite3.Connection, category: str, field: str, value: str) -> int:

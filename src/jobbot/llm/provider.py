@@ -19,6 +19,11 @@ class OpenAICompatibleProvider(LLMProvider):
         self.api_key = api_key or os.getenv("JOBBOT_OPENAI_API_KEY")
 
     def generate(self, prompt: str) -> str:
+        if os.getenv("JOBBOT_ALLOW_REMOTE_LLM", "false").lower() != "true":
+            raise RuntimeError(
+                "Remote LLM use is disabled; set JOBBOT_ALLOW_REMOTE_LLM=true "
+                "only after explicit approval"
+            )
         if not self.api_key:
             raise RuntimeError("OpenAI-compatible API key is not configured")
         return f"[stubbed completion for {self.model}] {prompt[:80]}"

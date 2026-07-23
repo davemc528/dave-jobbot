@@ -90,7 +90,15 @@ def _verification_page() -> None:
     for failure in missing:
         st.warning(failure)
 
-    for tier in (1, 2, 3):
+    selected_tier_label = st.radio(
+        "Verification tier",
+        [TIER_LABELS[tier] for tier in (1, 2, 3)],
+        horizontal=True,
+    )
+    selected_tier = next(
+        tier for tier, label in TIER_LABELS.items() if label == selected_tier_label
+    )
+    for tier in (selected_tier,):
         st.header(TIER_LABELS[tier])
         tier_facts = [fact for fact in facts if _tier(fact.category) == tier]
         batch_options = {
@@ -204,12 +212,36 @@ def _verification_page() -> None:
         list(merge_options),
         key="manual-merge",
     )
+    if selected_merge:
+        st.write("Merge preview:")
+        for label in selected_merge:
+            selected_fact = next(fact for fact in facts if fact.id == merge_options[label])
+            st.write(
+                {
+                    "field": f"{selected_fact.category}.{selected_fact.field_name}",
+                    "value": selected_fact.display_value,
+                    "sources": selected_fact.source_documents,
+                    "status": selected_fact.verification_status,
+                }
+            )
     if st.button("Merge selected facts"):
         try:
             merge_facts(connection, [merge_options[label] for label in selected_merge])
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
+
+    st.header("Audit history")
+    audit_rows = connection.execute(
+        """
+        SELECT created_at, action, canonical_fact_id, actor, notes
+        FROM profile_audit_log ORDER BY id DESC LIMIT 100
+        """
+    ).fetchall()
+    if audit_rows:
+        st.dataframe([dict(row) for row in audit_rows], width="stretch")
+    else:
+        st.info("No profile changes have been recorded.")
 
     st.header("Application-answer intake")
     st.caption(
@@ -219,8 +251,17 @@ def _verification_page() -> None:
     for field_name, (sensitivity, _) in INTAKE_FIELDS.items():
         label = field_name.replace("_", " ").title()
         if sensitivity in {"sensitive", "restricted"}:
+            manual_choice = st.selectbox(
+                label,
+                ["Manual entry required", "Prefer not to answer"],
+                key=f"manual-choice-{field_name}",
+            )
             if st.button(f"Mark {label} manual-only", key=f"manual-{field_name}"):
                 mark_sensitive_manual_only(connection, field_name)
+                st.info(
+                    f"{label} marked manual-only. The selected handling "
+                    f"({manual_choice}) was not persisted."
+                )
                 st.rerun()
             continue
         value = st.text_input(label, key=f"intake-{field_name}")

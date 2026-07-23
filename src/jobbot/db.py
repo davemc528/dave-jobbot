@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 
 from .config import DB_PATH
+from .migrations import record_phase_15_migration
 
 
 def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
@@ -193,6 +194,8 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
             ON canonical_fact_sources(canonical_fact_id);
         CREATE INDEX IF NOT EXISTS idx_profile_audit_fact
             ON profile_audit_log(canonical_fact_id);
+
         """
     )
+    record_phase_15_migration(connection)
     connection.commit()
