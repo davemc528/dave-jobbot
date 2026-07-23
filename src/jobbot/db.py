@@ -3,12 +3,16 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from .config import DB_PATH
-from .migrations import record_phase_15_migration, record_phase_16_migration
+from .config import resolve_db_path
+from .migrations import (
+    record_phase_15_migration,
+    record_phase_16_migration,
+    record_phase_16_state_fix,
+)
 
 
 def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
-    target = Path(db_path or DB_PATH)
+    target = resolve_db_path(db_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(target)
     connection.row_factory = sqlite3.Row
@@ -237,4 +241,18 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE review_items ADD COLUMN recommended_action TEXT")
     if "metadata" not in review_columns:
         connection.execute("ALTER TABLE review_items ADD COLUMN metadata TEXT")
+    answer_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(application_answers)").fetchall()
+    }
+    answer_migrations = {
+        "normalized_value": "TEXT",
+        "review_required": "INTEGER NOT NULL DEFAULT 0",
+        "active": "INTEGER NOT NULL DEFAULT 1",
+        "superseded_by": "TEXT",
+        "provenance": "TEXT",
+    }
+    for column, definition in answer_migrations.items():
+        if column not in answer_columns:
+            connection.execute(f"ALTER TABLE application_answers ADD COLUMN {column} {definition}")
+    record_phase_16_state_fix(connection)
     connection.commit()

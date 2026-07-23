@@ -14,7 +14,7 @@ import typer
 from jobbot.applications.records import create_application
 from jobbot.browser.automation import AutomationMode, resume_run, run_automation
 from jobbot.browser.playwright_mvp import inspect_form
-from jobbot.config import BASE_DIR, DB_PATH, SOURCE_DIR, ensure_directories
+from jobbot.config import BASE_DIR, SOURCE_DIR, ensure_directories, resolve_db_path
 from jobbot.db import get_connection
 from jobbot.documents.extract import extract_text, infer_document_type
 from jobbot.documents.facts import EXPECTED_DOCUMENTS, extract_candidate_facts
@@ -29,6 +29,7 @@ from jobbot.profile.canonical import (
 )
 from jobbot.profile.application_answers import (
     apply_approved_defaults,
+    effective_answer_state,
     list_answers,
 )
 from jobbot.security import safe_log
@@ -58,7 +59,7 @@ def init() -> None:
     ensure_directories()
     with get_connection():
         pass
-    typer.echo(f"Initialized local datastore at {DB_PATH}.")
+    typer.echo(f"Initialized local datastore at {resolve_db_path()}.")
 
 
 @app.command("import-documents")
@@ -223,8 +224,12 @@ def profile_readiness_command() -> None:
 @intake_app.command("apply-approved-defaults")
 def apply_profile_defaults() -> None:
     with get_connection() as connection:
-        count = apply_approved_defaults(connection)
-    typer.echo(f"Applied {count} explicitly user-approved application answers.")
+        result = apply_approved_defaults(connection)
+    typer.echo(
+        f"Approved defaults: inserted={result.inserted}, updated={result.updated}, "
+        f"unchanged={result.unchanged}, superseded={result.superseded}, "
+        f"active={result.active_count}"
+    )
 
 
 @answers_app.command("list")
@@ -232,9 +237,10 @@ def profile_answers_list() -> None:
     with get_connection() as connection:
         answers = list_answers(connection)
     for answer in answers:
+        state = effective_answer_state(answer)
         typer.echo(
             f"{answer.field_name}: {answer.display_value} "
-            f"[{answer.verification_status}; autofill={answer.autofill_permission}]"
+            f"[{answer.verification_status}; {state.status}]"
         )
 
 
@@ -244,7 +250,8 @@ def profile_answers_audit() -> None:
         rows = connection.execute(
             """
             SELECT created_at, action, after_json, notes FROM profile_audit_log
-            WHERE action IN ('approved_default_applied', 'ambiguous_default_recorded')
+            WHERE action LIKE 'approved_default_%'
+               OR action IN ('application_answer_superseded', 'application_answer_edited')
             ORDER BY id DESC
             """
         ).fetchall()
@@ -473,7 +480,40 @@ def doctor() -> None:
     try:
         with get_connection() as connection:
             connection.execute("SELECT 1")
-        checks.append(("SQLite access", True, str(DB_PATH)))
+            latest = connection.execute(
+                "SELECT version FROM schema_migrations ORDER BY applied_at DESC, version DESC LIMIT 1"
+            ).fetchone()
+            counts = connection.execute(
+                """
+                SELECT count(*) active,
+                  sum(CASE WHEN verification_status='verified' THEN 1 ELSE 0 END) verified,
+                  sum(CASE WHEN autofill_permission=1 AND verification_status='verified'
+                           THEN 1 ELSE 0 END) autofill,
+                  sum(CASE WHEN autofill_permission=0 THEN 1 ELSE 0 END) manual,
+                  sum(CASE WHEN verification_status='conflicted' THEN 1 ELSE 0 END) conflicted,
+                  sum(CASE WHEN review_required=1 THEN 1 ELSE 0 END) review_required
+                FROM application_answers WHERE active=1
+                """
+            ).fetchone()
+        resolved_db = resolve_db_path()
+        checks.append(
+            (
+                "SQLite access",
+                resolved_db.exists(),
+                f"resolved={resolved_db}; exists={resolved_db.exists()}",
+            )
+        )
+        checks.append(
+            (
+                "Database diagnostics",
+                True,
+                f"migration={latest['version'] if latest else 'none'}; "
+                f"active={counts['active']}; verified={counts['verified'] or 0}; "
+                f"autofill={counts['autofill'] or 0}; manual_only={counts['manual'] or 0}; "
+                f"conflicted={counts['conflicted'] or 0}; "
+                f"requiring_review={counts['review_required'] or 0}",
+            )
+        )
     except sqlite3.Error as exc:
         checks.append(("SQLite access", False, str(exc)))
     chromium_found = False

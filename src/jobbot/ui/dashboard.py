@@ -5,8 +5,12 @@ from collections import Counter
 import streamlit as st
 
 from jobbot.db import get_connection
-from jobbot.config import AUTOMATION
-from jobbot.profile.application_answers import WORK_AUTH_WARNING, list_answers, utc_now
+from jobbot.config import AUTOMATION, resolve_db_path
+from jobbot.profile.application_answers import (
+    effective_answer_state,
+    list_answers,
+    utc_now,
+)
 from jobbot.profile.canonical import (
     INTAKE_FIELDS,
     apply_canonical_proposals,
@@ -42,6 +46,23 @@ TIER_LABELS = {
     1: "Tier 1 — Core factual profile",
     2: "Tier 2 — Skills and positioning",
     3: "Tier 3 — Application-specific and sensitive",
+}
+
+INTAKE_TO_ANSWER = {
+    "current_city_state": "current_location",
+    "work_authorization": "legally_authorized_to_work",
+    "sponsorship_requirement": "sponsorship_required",
+    "willing_to_relocate": "willing_to_relocate",
+    "approved_relocation_destinations": "approved_relocation_destinations",
+    "maximum_travel_percentage": "maximum_travel_percentage",
+    "workplace_preferences": "workplace_preferences",
+    "minimum_compensation": "minimum_compensation",
+    "compensation_may_autofill": "minimum_compensation",
+    "earliest_start_date": "earliest_start",
+    "notice_period": "notice_period",
+    "previously_worked_for_employer": "previous_employer",
+    "noncompete": "noncompete_restriction",
+    "eeo_answers": "eeo_decline",
 }
 
 
@@ -247,11 +268,21 @@ def _verification_page() -> None:
 
     st.header("Application-answer intake")
     st.caption(
-        "Sensitive answers are not stored because encryption at rest is not yet implemented. "
-        "They can only be marked manual-only."
+        "Approved application answers use the authoritative application-answer store. "
+        "Sensitivity alone does not disable explicit autofill permission."
     )
+    approved_answers = {answer.field_name: answer for answer in list_answers(connection)}
     for field_name, (sensitivity, _) in INTAKE_FIELDS.items():
         label = field_name.replace("_", " ").title()
+        approved = approved_answers.get(INTAKE_TO_ANSWER.get(field_name, field_name))
+        if approved:
+            state = effective_answer_state(approved)
+            st.write(
+                f"{label}: **{state.status}** — {state.explanation} "
+                f"(verified={approved.verification_status}, "
+                f"permission={approved.autofill_permission})"
+            )
+            continue
         if sensitivity in {"sensitive", "restricted"}:
             manual_choice = st.selectbox(
                 label,
@@ -297,16 +328,28 @@ def _jobs_page() -> None:
 def _application_answers_page() -> None:
     st.title("Application Answers")
     connection = get_connection()
+    if st.button("Refresh database state"):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.rerun()
     answers = list_answers(connection)
-    st.error(f"Unresolved work-authorization warning: {WORK_AUTH_WARNING}")
+    st.success(
+        "Employment eligibility resolved: legal authorization Yes; sponsorship No; "
+        "authorization assistance No."
+    )
     for answer in answers:
-        with st.expander(
-            f"{answer.field_name}: {answer.display_value} [{answer.verification_status}]"
-        ):
+        state = effective_answer_state(answer)
+        with st.expander(f"{answer.field_name}: {answer.display_value} [{state.status}]"):
+            st.write("Effective autofill status:", state.status)
+            st.write("Eligibility explanation:", state.explanation)
             st.write("Question categories:", answer.question_categories)
             st.write("Autofill:", answer.autofill_permission)
             st.write("Sensitivity:", answer.sensitivity)
             st.write("Last verified:", answer.date_verified)
+            st.write("Last updated:", answer.updated_at)
+            st.write("Provenance:", answer.provenance)
+            st.write("Active:", answer.active)
+            st.write("Superseded by:", answer.superseded_by or "None")
             edited = st.text_input(
                 "Verified value",
                 answer.canonical_value or "",
@@ -343,8 +386,8 @@ def _application_answers_page() -> None:
     audit = connection.execute(
         """
         SELECT created_at, action, after_json, notes FROM profile_audit_log
-        WHERE action IN ('approved_default_applied', 'ambiguous_default_recorded',
-                         'application_answer_edited')
+        WHERE action LIKE 'approved_default_%'
+           OR action IN ('application_answer_superseded', 'application_answer_edited')
         ORDER BY id DESC LIMIT 100
         """
     ).fetchall()
@@ -370,6 +413,8 @@ def _application_answers_page() -> None:
         "Automatic real-site execution is disabled. Local automatic dry-run is ready "
         "only when the selected fixture/job has no unresolved required-field blocker."
     )
+    st.header("Database Diagnostics")
+    st.code(str(resolve_db_path()))
     connection.close()
 
 

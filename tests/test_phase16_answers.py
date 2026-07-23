@@ -9,6 +9,8 @@ from jobbot.profile.application_answers import (
     QuestionContext,
     answer_map,
     apply_approved_defaults,
+    effective_answer_state,
+    list_answers,
     match_question,
 )
 
@@ -50,22 +52,25 @@ def test_approved_values_have_explicit_verification_and_audit() -> None:
         "phone",
         "current_location",
         "linkedin_url",
+        "legally_authorized_to_work",
         "sponsorship_required",
+        "needs_employment_authorization_assistance",
         "noncompete_restriction",
     ):
         assert answers[field].verification_status == "verified"
         assert answers[field].verification_method == "explicit_user_instruction"
         assert answers[field].date_verified
         assert answers[field].autofill_permission is True
-    work_auth = answers["work_authorization_user_response"]
-    assert work_auth.verification_status == "needs_edit"
-    assert work_auth.autofill_permission is False
+    assert answers["legally_authorized_to_work"].canonical_value == "Yes"
+    assert answers["legally_authorized_to_work"].normalized_value == "true"
+    assert answers["sponsorship_required"].canonical_value == "No"
+    assert answers["needs_employment_authorization_assistance"].canonical_value == "No"
     assert (
         connection.execute(
             "SELECT count(*) FROM profile_audit_log "
-            "WHERE action IN ('approved_default_applied','ambiguous_default_recorded')"
+            "WHERE action IN ('approved_default_inserted','approved_default_updated')"
         ).fetchone()[0]
-        == 19
+        == 20
     )
 
 
@@ -79,7 +84,7 @@ def test_contact_formatting_and_identity_matching() -> None:
     assert match(connection, "LinkedIn profile").proposed_answer is not None
 
 
-def test_sponsorship_semantics_do_not_fill_ambiguous_work_authorization() -> None:
+def test_three_employment_eligibility_semantics_remain_separate() -> None:
     connection = database()
     sponsorship = match(connection, "Will you now or in the future require visa sponsorship?")
     assert sponsorship.category == "requires_sponsorship"
@@ -87,8 +92,22 @@ def test_sponsorship_semantics_do_not_fill_ambiguous_work_authorization() -> Non
     assert sponsorship.autofill_permitted is True
     authorization = match(connection, "Are you legally authorized to work in the United States?")
     assert authorization.category == "legally_authorized_to_work"
-    assert authorization.autofill_permitted is False
-    assert authorization.review_type == "ambiguous_work_authorization"
+    assert authorization.proposed_answer == "Yes"
+    assert authorization.autofill_permitted is True
+    assistance = match(
+        connection,
+        "Will you require the employer to obtain employment authorization on your behalf?",
+    )
+    assert assistance.category == "needs_employment_authorization_assistance"
+    assert assistance.proposed_answer == "No"
+    assert assistance.autofill_permitted is True
+    outside = match(
+        connection,
+        "Are you legally authorized to work in Canada?",
+        context=QuestionContext(posting_country="Canada"),
+    )
+    assert outside.autofill_permitted is False
+    assert outside.review_type == "authorization_outside_verified_scope"
 
 
 def test_relocation_workplace_and_travel_rules() -> None:
@@ -197,8 +216,15 @@ def test_automatic_dry_run_fills_only_verified_high_confidence_and_stops() -> No
         ),
     )
     filled = {item["field"] for item in result.filled}
-    assert {"preferred_name", "email", "phone", "linkedin_url", "requires_sponsorship"} <= filled
-    assert "legal_authorization" not in filled
+    assert {
+        "preferred_name",
+        "email",
+        "phone",
+        "linkedin_url",
+        "requires_sponsorship",
+        "legal_authorization",
+        "authorization_assistance",
+    } <= filled
     assert "numeric_compensation" not in filled
     assert "start_date" not in filled
     assert result.status == "stopped_before_submit"
@@ -250,7 +276,7 @@ def test_required_eeo_fixture_without_decline_creates_review() -> None:
     assert result.stopped_before_submit is True
 
 
-def test_automatic_readiness_blocks_required_ambiguity_but_not_sponsorship() -> None:
+def test_automatic_readiness_accepts_verified_us_authorization_and_sponsorship() -> None:
     connection = database()
     sponsorship = match(connection, "Will you now or in the future require visa sponsorship?")
     resume = Path("tests/fixtures/generic_form.html").resolve()
@@ -260,9 +286,66 @@ def test_automatic_readiness_blocks_required_ambiguity_but_not_sponsorship() -> 
     )
     assert ready.ready is True
     legal = match(connection, "Are you legally authorized to work in the United States?")
-    blocked = automatic_run_readiness(
+    legal_ready = automatic_run_readiness(
         required_matches=[legal],
         selected_resume=str(resume),
     )
-    assert blocked.ready is False
-    assert any("work-authorization" in item for item in blocked.blockers)
+    assert legal_ready.ready is True
+
+
+def test_defaults_are_idempotent_and_effective_status_is_shared() -> None:
+    connection = database()
+    before = connection.execute(
+        "SELECT count(*) FROM application_answers WHERE active=1"
+    ).fetchone()[0]
+    result = apply_approved_defaults(connection)
+    after = connection.execute(
+        "SELECT count(*) FROM application_answers WHERE active=1"
+    ).fetchone()[0]
+    assert before == after == 20
+    assert result.inserted == 0
+    assert result.updated == 0
+    assert result.unchanged == 20
+    assert not connection.execute(
+        """
+        SELECT field_name FROM application_answers
+        WHERE active=1 GROUP BY field_name HAVING count(*) > 1
+        """
+    ).fetchall()
+    for answer in list_answers(connection):
+        state = effective_answer_state(answer)
+        assert state.status == "Autofill enabled", (
+            f"{answer.field_name} incorrectly displayed {state.status}: {state.explanation}"
+        )
+    email = answer_map(connection)["email"]
+    assert effective_answer_state(email).eligible is True
+    assert match(connection, "Email address").autofill_permitted is True
+    assert email.sensitivity == "sensitive"
+
+
+def test_stale_ambiguous_authorization_is_superseded_not_selected() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    initialize_schema(connection)
+    connection.execute(
+        """
+        INSERT INTO application_answers
+          (field_name, canonical_value, display_value, raw_value, verification_status,
+           verification_method, sensitivity, autofill_permission, question_categories,
+           date_verified, review_notes, updated_at)
+        VALUES ('work_authorization_user_response', 'No', 'No', 'No', 'needs_edit',
+                'explicit_user_instruction', 'sensitive', 0,
+                '["legally_authorized_to_work"]', NULL, 'old ambiguity', 'old')
+        """
+    )
+    result = apply_approved_defaults(connection)
+    stale = connection.execute(
+        """
+        SELECT active, superseded_by FROM application_answers
+        WHERE field_name='work_authorization_user_response'
+        """
+    ).fetchone()
+    assert result.superseded == 1
+    assert stale["active"] == 0
+    assert stale["superseded_by"] == "legally_authorized_to_work"
+    assert "work_authorization_user_response" not in answer_map(connection)

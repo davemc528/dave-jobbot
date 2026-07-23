@@ -10,7 +10,18 @@ DATA_DIR = BASE_DIR / "data"
 LOG_DIR = BASE_DIR / "logs"
 SCREENSHOT_DIR = BASE_DIR / "screenshots"
 SOURCE_DIR = BASE_DIR / "source_documents"
-DB_PATH = BASE_DIR / os.getenv("JOBBOT_DB_PATH", "data/jobbot.db")
+
+
+def resolve_db_path(explicit: Path | str | None = None) -> Path:
+    configured = (
+        Path(explicit)
+        if explicit is not None
+        else Path(os.getenv("JOBBOT_DB_PATH", "data/jobbot.db"))
+    )
+    return configured.resolve() if configured.is_absolute() else (BASE_DIR / configured).resolve()
+
+
+DB_PATH = resolve_db_path()
 
 
 class AutomationConfig(BaseModel):

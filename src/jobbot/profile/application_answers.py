@@ -24,12 +24,33 @@ class ApplicationAnswer(BaseModel):
     question_categories: list[str] = Field(default_factory=list)
     date_verified: str | None
     review_notes: str | None
+    normalized_value: str | None = None
+    review_required: bool = False
+    active: bool = True
+    superseded_by: str | None = None
+    provenance: str | None = None
+    updated_at: str | None = None
+
+
+class EffectiveAnswerState(BaseModel):
+    status: str
+    eligible: bool
+    explanation: str
+
+
+class ApplyDefaultsResult(BaseModel):
+    inserted: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    superseded: int = 0
+    active_count: int = 0
 
 
 class QuestionContext(BaseModel):
     posting_locations: list[str] = Field(default_factory=list)
     employer: str | None = None
     travel_percentage: int | None = None
+    posting_country: str | None = None
 
 
 class QuestionMatch(BaseModel):
@@ -102,7 +123,24 @@ APPROVED_DEFAULTS: tuple[dict[str, object], ...] = (
         "canonical_value": "No",
         "display_value": "No",
         "sensitivity": "sensitive",
-        "categories": ["requires_sponsorship", "needs_employment_authorization_assistance"],
+        "normalized_value": "false",
+        "categories": ["requires_sponsorship"],
+    },
+    {
+        "field_name": "legally_authorized_to_work",
+        "canonical_value": "Yes",
+        "display_value": "Yes",
+        "normalized_value": "true",
+        "sensitivity": "sensitive",
+        "categories": ["legally_authorized_to_work"],
+    },
+    {
+        "field_name": "needs_employment_authorization_assistance",
+        "canonical_value": "No",
+        "display_value": "No",
+        "normalized_value": "false",
+        "sensitivity": "sensitive",
+        "categories": ["needs_employment_authorization_assistance"],
     },
     {
         "field_name": "noncompete_restriction",
@@ -176,10 +214,7 @@ APPROVED_DEFAULTS: tuple[dict[str, object], ...] = (
     },
 )
 
-WORK_AUTH_WARNING = (
-    'Potential conflict: answering No to "Are you legally authorized to work in the '
-    'United States?" may be disqualifying, while sponsorship_required is also No.'
-)
+WORK_AUTH_WARNING = ""
 
 
 def _audit_answer(
@@ -200,84 +235,195 @@ def _audit_answer(
     )
 
 
-def apply_approved_defaults(connection: sqlite3.Connection) -> int:
+def _desired_values(item: dict[str, object]) -> dict[str, object]:
+    canonical = str(item["canonical_value"])
+    return {
+        "canonical_value": canonical,
+        "display_value": str(item["display_value"]),
+        "raw_value": item.get("raw_value"),
+        "normalized_value": str(item.get("normalized_value", canonical.casefold())),
+        "verification_status": "verified",
+        "verification_method": "explicit_user_instruction",
+        "sensitivity": str(item["sensitivity"]),
+        "autofill_permission": 1,
+        "review_required": 0,
+        "question_categories": json.dumps(item["categories"]),
+        "active": 1,
+        "superseded_by": None,
+        "provenance": "Phase I.6 explicit user instruction",
+        "review_notes": "Explicitly approved by the user",
+    }
+
+
+def apply_approved_defaults(connection: sqlite3.Connection) -> ApplyDefaultsResult:
     now = utc_now()
-    for item in APPROVED_DEFAULTS:
+    result = ApplyDefaultsResult()
+    stale = connection.execute(
+        """
+        SELECT id, active FROM application_answers
+        WHERE field_name='work_authorization_user_response'
+        """
+    ).fetchone()
+    if stale is not None and bool(stale["active"]):
         connection.execute(
             """
-            INSERT INTO application_answers
-              (field_name, canonical_value, display_value, raw_value, verification_status,
-               verification_method, sensitivity, autofill_permission, question_categories,
-               date_verified, review_notes, updated_at)
-            VALUES (?, ?, ?, ?, 'verified', 'explicit_user_instruction', ?, 1, ?, ?, ?, ?)
-            ON CONFLICT(field_name) DO UPDATE SET
-              canonical_value=excluded.canonical_value, display_value=excluded.display_value,
-              raw_value=excluded.raw_value, verification_status=excluded.verification_status,
-              verification_method=excluded.verification_method,
-              sensitivity=excluded.sensitivity, autofill_permission=excluded.autofill_permission,
-              question_categories=excluded.question_categories,
-              date_verified=excluded.date_verified, review_notes=excluded.review_notes,
-              updated_at=excluded.updated_at
+            UPDATE application_answers SET active=0, autofill_permission=0,
+              review_required=0, superseded_by='legally_authorized_to_work',
+              updated_at=? WHERE id=?
             """,
-            (
-                item["field_name"],
-                item["canonical_value"],
-                item["display_value"],
-                item.get("raw_value"),
-                item["sensitivity"],
-                json.dumps(item["categories"]),
-                now,
-                "Explicitly approved by the user",
-                now,
-            ),
+            (now, stale["id"]),
         )
         _audit_answer(
             connection,
-            "approved_default_applied",
-            str(item["field_name"]),
+            "application_answer_superseded",
+            "work_authorization_user_response",
+            {"superseded_by": "legally_authorized_to_work"},
+        )
+        result.superseded += 1
+    for item in APPROVED_DEFAULTS:
+        field_name = str(item["field_name"])
+        desired = _desired_values(item)
+        existing = connection.execute(
+            "SELECT * FROM application_answers WHERE field_name=?", (field_name,)
+        ).fetchone()
+        comparison_fields = tuple(desired)
+        unchanged = bool(
+            existing and all(existing[field] == desired[field] for field in comparison_fields)
+        )
+        if unchanged:
+            result.unchanged += 1
+            continue
+        if existing is None:
+            connection.execute(
+                """
+                INSERT INTO application_answers
+                  (field_name, canonical_value, display_value, raw_value, normalized_value,
+                   verification_status, verification_method, sensitivity,
+                   autofill_permission, review_required, question_categories, date_verified,
+                   review_notes, active, superseded_by, provenance, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    field_name,
+                    desired["canonical_value"],
+                    desired["display_value"],
+                    desired["raw_value"],
+                    desired["normalized_value"],
+                    desired["verification_status"],
+                    desired["verification_method"],
+                    desired["sensitivity"],
+                    desired["autofill_permission"],
+                    desired["review_required"],
+                    desired["question_categories"],
+                    now,
+                    desired["review_notes"],
+                    desired["active"],
+                    desired["superseded_by"],
+                    desired["provenance"],
+                    now,
+                ),
+            )
+            result.inserted += 1
+        else:
+            connection.execute(
+                """
+                UPDATE application_answers SET
+                  canonical_value=?, display_value=?, raw_value=?, normalized_value=?,
+                  verification_status=?, verification_method=?, sensitivity=?,
+                  autofill_permission=?, review_required=?, question_categories=?,
+                  date_verified=?, review_notes=?, active=?, superseded_by=?, provenance=?,
+                  updated_at=? WHERE field_name=?
+                """,
+                (
+                    desired["canonical_value"],
+                    desired["display_value"],
+                    desired["raw_value"],
+                    desired["normalized_value"],
+                    desired["verification_status"],
+                    desired["verification_method"],
+                    desired["sensitivity"],
+                    desired["autofill_permission"],
+                    desired["review_required"],
+                    desired["question_categories"],
+                    now,
+                    desired["review_notes"],
+                    desired["active"],
+                    desired["superseded_by"],
+                    desired["provenance"],
+                    now,
+                    field_name,
+                ),
+            )
+            result.updated += 1
+        _audit_answer(
+            connection,
+            "approved_default_inserted" if existing is None else "approved_default_updated",
+            field_name,
             {"verification_method": "explicit_user_instruction", "autofill": True},
         )
     connection.execute(
         """
-        INSERT INTO application_answers
-          (field_name, canonical_value, display_value, raw_value, verification_status,
-           verification_method, sensitivity, autofill_permission, question_categories,
-           date_verified, review_notes, updated_at)
-        VALUES ('work_authorization_user_response', 'No', 'No', 'No', 'needs_edit',
-                'explicit_user_instruction', 'sensitive', 0, ?, NULL, ?, ?)
-        ON CONFLICT(field_name) DO UPDATE SET
-          canonical_value='No', display_value='No', raw_value='No',
-          verification_status='needs_edit',
-          verification_method='explicit_user_instruction', sensitivity='sensitive',
-          autofill_permission=0, question_categories=excluded.question_categories,
-          date_verified=NULL, review_notes=excluded.review_notes, updated_at=excluded.updated_at
-        """,
-        (json.dumps(["legally_authorized_to_work"]), WORK_AUTH_WARNING, now),
+        UPDATE review_items SET status='resolved'
+        WHERE item_type='ambiguous_work_authorization' AND status='pending'
+        """
     )
-    _audit_answer(
-        connection,
-        "ambiguous_default_recorded",
-        "work_authorization_user_response",
-        {"verification_status": "needs_edit", "autofill": False},
+    result.active_count = int(
+        connection.execute("SELECT count(*) FROM application_answers WHERE active=1").fetchone()[0]
     )
     connection.commit()
-    return len(APPROVED_DEFAULTS) + 1
+    return result
 
 
-def list_answers(connection: sqlite3.Connection) -> list[ApplicationAnswer]:
-    rows = connection.execute("SELECT * FROM application_answers ORDER BY field_name").fetchall()
+def list_answers(
+    connection: sqlite3.Connection, *, include_inactive: bool = False
+) -> list[ApplicationAnswer]:
+    where = "" if include_inactive else "WHERE active=1"
+    rows = connection.execute(
+        f"SELECT * FROM application_answers {where} ORDER BY field_name"
+    ).fetchall()
     answers: list[ApplicationAnswer] = []
     for row in rows:
         values = dict(row)
         values["autofill_permission"] = bool(values["autofill_permission"])
+        values["review_required"] = bool(values["review_required"])
+        values["active"] = bool(values["active"])
         values["question_categories"] = json.loads(values["question_categories"])
-        values.pop("updated_at")
         answers.append(ApplicationAnswer.model_validate(values))
     return answers
 
 
 def answer_map(connection: sqlite3.Connection) -> dict[str, ApplicationAnswer]:
     return {answer.field_name: answer for answer in list_answers(connection)}
+
+
+def effective_answer_state(answer: ApplicationAnswer) -> EffectiveAnswerState:
+    if not answer.active:
+        return EffectiveAnswerState(
+            status="Superseded", eligible=False, explanation="This record is inactive"
+        )
+    if answer.verification_status in {"conflicted", "needs_edit"} or answer.review_required:
+        return EffectiveAnswerState(
+            status="Blocked by conflict",
+            eligible=False,
+            explanation="The active answer requires conflict resolution",
+        )
+    if answer.verification_status != "verified":
+        return EffectiveAnswerState(
+            status="Manual entry required",
+            eligible=False,
+            explanation="The answer has not been explicitly verified",
+        )
+    if not answer.autofill_permission:
+        return EffectiveAnswerState(
+            status="Disabled by user",
+            eligible=False,
+            explanation="Autofill permission is disabled",
+        )
+    return EffectiveAnswerState(
+        status="Autofill enabled",
+        eligible=True,
+        explanation="Verified and explicitly approved for autofill",
+    )
 
 
 def _result(
@@ -291,12 +437,8 @@ def _result(
     recommended_action: str | None = None,
     alternatives: list[str] | None = None,
 ) -> QuestionMatch:
-    allowed = bool(
-        answer
-        and answer.verification_status == "verified"
-        and answer.autofill_permission
-        and review_type is None
-    )
+    effective = effective_answer_state(answer) if answer else None
+    allowed = bool(effective and effective.eligible and review_type is None)
     resolved_answer = (
         None
         if review_type is not None and proposed is None
@@ -370,19 +512,32 @@ def match_question(
     legal_auth = bool(
         re.search(r"\blegally authorized\b.*\b(work|employment)\b", text)
         or re.search(r"\bauthorized to work\b", text)
+        or re.search(r"\bproof of eligibility\b.*\bwork\b", text)
     )
     if legal_auth:
+        explicit_us = bool(
+            re.search(r"\b(united states|u\.?s\.?a?)\b", text)
+            or (context.posting_country or "").casefold() in {"united states", "us", "usa", "u.s."}
+        )
+        if not explicit_us:
+            return _result(
+                "legally_authorized_to_work",
+                answers.get("legally_authorized_to_work"),
+                0.8,
+                "Authorization is verified only for the United States",
+                review_type="authorization_outside_verified_scope",
+                recommended_action="Confirm authorization for the country named by the posting",
+            )
         return _result(
             "legally_authorized_to_work",
-            answers.get("work_authorization_user_response"),
+            answers.get("legally_authorized_to_work"),
             0.99,
-            "Legal-authorization wording is distinct from sponsorship",
-            review_type="ambiguous_work_authorization",
-            recommended_action="Confirm the intended legal-authorization answer",
-            alternatives=["Yes may indicate legal authorization", "No may be disqualifying"],
+            "Matched verified United States legal-authorization semantics",
         )
-    if re.search(r"\b(now or in the future|future)\b.*\bsponsor", text) or re.search(
-        r"\brequire\b.*\b(visa )?sponsorship\b", text
+    if (
+        re.search(r"\b(now or in the future|future)\b.*\bsponsor", text)
+        or re.search(r"\brequire\b.*\b(visa )?sponsorship\b", text)
+        or re.search(r"\b(company|employer)\b.*\bsponsor or transfer\b.*\bvisa\b", text)
     ):
         return _result(
             "requires_sponsorship",
@@ -390,10 +545,13 @@ def match_question(
             0.99,
             "Matched full sponsorship semantics, not a substring alone",
         )
-    if re.search(r"\b(employer|company)\b.*\b(obtain|provide)\b.*\bwork authorization\b", text):
+    if re.search(
+        r"\b(employer|company)\b.*\b(obtain|provide)\b.*\b(work|employment) authorization\b",
+        text,
+    ) or re.search(r"\bneed\b.*\bassistance\b.*\b(work|employment) authorization\b", text):
         return _result(
             "needs_employment_authorization_assistance",
-            answers.get("sponsorship_required"),
+            answers.get("needs_employment_authorization_assistance"),
             0.96,
             "Matched employer-assistance authorization semantics",
         )
