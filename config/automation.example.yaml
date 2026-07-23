@@ -1,0 +1,18 @@
+automation:
+  enabled: false
+  mode: automatic_dry_run
+  visible_browser: true
+  stop_before_submit: true
+  final_submit_enabled: false
+  real_site_dry_run_enabled: false
+  require_cli_confirmation: true
+  captcha_policy: pause_for_human
+  minimum_autofill_confidence: 0.92
+
+real_site:
+  allowed_domains:
+    - eisai.wd5.myworkdayjobs.com
+  block_unknown_domains: true
+  preserve_browser_state: true
+  screenshot_checkpoints: true
+  approved_resumes: {}

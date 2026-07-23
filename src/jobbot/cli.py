@@ -14,8 +14,16 @@ import typer
 
 from jobbot.applications.records import create_application
 from jobbot.browser.automation import AutomationMode, resume_run, run_automation
+from jobbot.browser.preflight import audit_preflight, build_preflight
 from jobbot.browser.playwright_mvp import inspect_form
-from jobbot.config import BASE_DIR, SOURCE_DIR, ensure_directories, resolve_db_path
+from jobbot.config import (
+    AUTOMATION,
+    REAL_SITE,
+    BASE_DIR,
+    SOURCE_DIR,
+    ensure_directories,
+    resolve_db_path,
+)
 from jobbot.db import get_connection
 from jobbot.documents.extract import extract_text, infer_document_type
 from jobbot.documents.facts import EXPECTED_DOCUMENTS, extract_candidate_facts
@@ -416,6 +424,11 @@ def browser_autofill(
     job_id: int,
     mode: str = typer.Option("supervised", "--mode"),
     visible: bool = typer.Option(True, "--visible/--headless"),
+    allow_real_site: bool = typer.Option(
+        False,
+        "--allow-real-site",
+        help="Authorize this invocation for an allowlisted real-site dry run.",
+    ),
 ) -> None:
     normalized_mode = mode.replace("-", "_")
     if normalized_mode not in {
@@ -426,22 +439,90 @@ def browser_autofill(
     }:
         raise typer.BadParameter(f"Unsupported mode: {mode}")
     with get_connection() as connection:
+        preflight = build_preflight(
+            connection,
+            job_id,
+            allow_real_site=allow_real_site,
+        )
+        audit_preflight(connection, preflight)
+        if normalized_mode == "automatic_dry_run" and not preflight.permitted:
+            if not preflight.selected_resume.approved:
+                connection.execute(
+                    """
+                    INSERT INTO review_items
+                      (item_type, summary, status, created_at, recommended_action, metadata)
+                    VALUES ('resume_approval_required', ?, 'pending', datetime('now'), ?, ?)
+                    """,
+                    (
+                        preflight.selected_resume.explanation,
+                        "Configure an existing ignored local resume for the selected track",
+                        json.dumps({"job_id": job_id}),
+                    ),
+                )
+                connection.commit()
+            raise typer.BadParameter(
+                "Real-site preflight failed: "
+                + "; ".join(preflight.blockers)
+                + f". Retry: jobbot browser autofill {job_id} "
+                "--mode automatic-dry-run --allow-real-site"
+            )
         result = run_automation(
             connection,
             _application_url(job_id),
             mode=cast(AutomationMode, normalized_mode),
             visible=visible,
             job_id=job_id,
+            allow_real_site=allow_real_site,
+            selected_resume=preflight.selected_resume.path,
         )
     safe_log("Browser dry run completed", job_id=job_id, status=result.status)
     typer.echo(result.model_dump_json(indent=2))
 
 
 @browser_app.command("resume")
-def browser_resume(run_id: int, visible: bool = typer.Option(True, "--visible/--headless")) -> None:
+def browser_resume(
+    run_id: int,
+    visible: bool = typer.Option(True, "--visible/--headless"),
+    allow_real_site: bool = typer.Option(False, "--allow-real-site"),
+) -> None:
     with get_connection() as connection:
-        result = resume_run(connection, run_id, visible=visible)
+        row = connection.execute(
+            "SELECT job_id FROM automation_runs WHERE id=?", (run_id,)
+        ).fetchone()
+        selected_resume = None
+        if row and row["job_id"]:
+            preflight = build_preflight(
+                connection, int(row["job_id"]), allow_real_site=allow_real_site
+            )
+            audit_preflight(connection, preflight)
+            if not preflight.permitted:
+                raise typer.BadParameter(
+                    "Real-site resume preflight failed: " + "; ".join(preflight.blockers)
+                )
+            selected_resume = preflight.selected_resume.path
+        result = resume_run(
+            connection,
+            run_id,
+            visible=visible,
+            allow_real_site=allow_real_site,
+            selected_resume=selected_resume,
+        )
     typer.echo(result.model_dump_json(indent=2))
+
+
+@browser_app.command("preflight")
+def browser_preflight(
+    job_id: int,
+    allow_real_site: bool = typer.Option(False, "--allow-real-site"),
+) -> None:
+    with get_connection() as connection:
+        report = build_preflight(
+            connection,
+            job_id,
+            allow_real_site=allow_real_site,
+        )
+        audit_preflight(connection, report)
+    typer.echo(report.model_dump_json(indent=2))
 
 
 @review_app.command("list")
@@ -483,6 +564,23 @@ def doctor() -> None:
             "Python 3.12+",
             tuple(map(int, platform.python_version_tuple()[:2])) >= (3, 12),
             platform.python_version(),
+        )
+    )
+    checks.append(
+        (
+            "Automation safety",
+            (
+                AUTOMATION.visible_browser
+                and AUTOMATION.stop_before_submit
+                and not AUTOMATION.final_submit_enabled
+            ),
+            f"enabled={AUTOMATION.enabled}; "
+            f"real_site_dry_run_enabled={AUTOMATION.real_site_dry_run_enabled}; "
+            f"visible_browser={AUTOMATION.visible_browser}; "
+            f"stop_before_submit={AUTOMATION.stop_before_submit}; "
+            f"final_submit_enabled={AUTOMATION.final_submit_enabled}; "
+            f"captcha_policy={AUTOMATION.captcha_policy}; "
+            f"allowed_domains={REAL_SITE.allowed_domains}",
         )
     )
     default_paths = ssl.get_default_verify_paths()
@@ -536,6 +634,22 @@ def doctor() -> None:
                 f"resolved={resolved_db}; exists={resolved_db.exists()}",
             )
         )
+        job_two = connection.execute("SELECT id FROM jobs WHERE id=2").fetchone()
+        if job_two:
+            job_two_report = build_preflight(connection, 2, allow_real_site=True)
+            checks.append(
+                (
+                    "Job 2 real-site preflight",
+                    job_two_report.permitted,
+                    f"hostname={job_two_report.hostname}; "
+                    f"allowed={job_two_report.domain_allowed}; "
+                    f"resume_track={job_two_report.selected_resume.track}; "
+                    f"resume={job_two_report.selected_resume.path}; "
+                    f"resume_exists={job_two_report.selected_resume.exists}; "
+                    f"ready={job_two_report.permitted}; "
+                    f"blockers={job_two_report.blockers}",
+                )
+            )
         checks.append(
             (
                 "Database diagnostics",

@@ -10,8 +10,14 @@ from urllib.parse import urlparse
 from playwright.sync_api import Page, sync_playwright
 from pydantic import BaseModel, Field
 
-from jobbot.config import AUTOMATION, SCREENSHOT_DIR
+from jobbot.browser.preflight import (
+    domain_is_allowed,
+    normalize_application_url,
+    normalize_hostname,
+)
+from jobbot.config import AUTOMATION, BROWSER_PROFILE_DIR, REAL_SITE, SCREENSHOT_DIR
 from jobbot.profile.application_answers import (
+    ApplicationAnswer,
     QuestionContext,
     answer_map,
     match_question,
@@ -42,11 +48,24 @@ class AutomationResult(BaseModel):
     captcha: CaptchaDetection = Field(default_factory=CaptchaDetection)
     stopped_before_submit: bool = True
     resume_command: str | None = None
+    original_url: str | None = None
+    normalized_url: str | None = None
+    hostname: str | None = None
+    redirect_chain: list[str] = Field(default_factory=list)
+    terminal_control_detected: list[str] = Field(default_factory=list)
 
 
 class AutomationReadiness(BaseModel):
     ready: bool
     blockers: list[str] = Field(default_factory=list)
+
+
+def authentication_required(body_text: str) -> bool:
+    normalized = body_text.casefold()
+    return any(
+        marker in normalized
+        for marker in ("sign in", "create account", "verify your email", "email verification")
+    )
 
 
 def automatic_run_readiness(
@@ -161,14 +180,44 @@ def run_automation(
     context: QuestionContext | None = None,
     visible: bool = True,
     job_id: int | None = None,
+    allow_real_site: bool = False,
+    selected_resume: str | None = None,
 ) -> AutomationResult:
     if mode == "automatic_submit":
         raise NotImplementedError(
             "automatic_submit is disabled and unimplemented; final submission requires a future phase"
         )
-    if urlparse(url).scheme != "file" and not AUTOMATION.enabled:
-        raise RuntimeError("Real-site automatic execution is disabled by configuration")
+    is_real_site = urlparse(url).scheme != "file"
+    if is_real_site:
+        if not AUTOMATION.enabled or not AUTOMATION.real_site_dry_run_enabled:
+            raise RuntimeError("Real-site dry runs are disabled by local configuration")
+        if AUTOMATION.require_cli_confirmation and not allow_real_site:
+            raise RuntimeError("Real-site dry run requires --allow-real-site for this invocation")
+        hostname = normalize_hostname(url)
+        if not domain_is_allowed(hostname, REAL_SITE.allowed_domains):
+            raise RuntimeError(f"Real-site hostname is not allowlisted: {hostname}")
+        if not visible:
+            raise RuntimeError("Real-site dry runs require a visible browser")
+        if not selected_resume or not Path(selected_resume).is_file():
+            raise RuntimeError("An existing explicitly approved resume is required")
+        if not AUTOMATION.stop_before_submit or AUTOMATION.final_submit_enabled:
+            raise RuntimeError("Final submission protection is not configured safely")
     answers = answer_map(connection)
+    if selected_resume:
+        answers["resume_path"] = ApplicationAnswer(
+            field_name="resume_path",
+            canonical_value=selected_resume,
+            display_value=selected_resume,
+            raw_value=selected_resume,
+            verification_status="verified",
+            verification_method="approved_local_configuration",
+            sensitivity="sensitive",
+            autofill_permission=True,
+            question_categories=["resume_upload"],
+            date_verified=utc_now(),
+            review_notes=None,
+            provenance="Ignored local real-site configuration",
+        )
     now = utc_now()
     cursor = connection.execute(
         """
@@ -180,13 +229,80 @@ def run_automation(
     run_id = int(cursor.lastrowid or 0)
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     screenshot_path = SCREENSHOT_DIR / f"automation-run-{run_id}.png"
-    result = AutomationResult(run_id=run_id, status="running", mode=mode)
+    before_path = SCREENSHOT_DIR / f"automation-run-{run_id}-before.png"
+    result = AutomationResult(
+        run_id=run_id,
+        status="running",
+        mode=mode,
+        original_url=url,
+        normalized_url=normalize_application_url(url) if is_real_site else url,
+        hostname=normalize_hostname(url) if is_real_site else None,
+    )
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=not visible)
-        page = browser.new_page()
+        if is_real_site and REAL_SITE.preserve_browser_state:
+            BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+            browser_context = playwright.chromium.launch_persistent_context(
+                str(BROWSER_PROFILE_DIR / "real-site"),
+                headless=False,
+            )
+            browser = None
+        else:
+            browser = playwright.chromium.launch(headless=not visible)
+            browser_context = browser.new_context()
+        page = browser_context.new_page()
+        redirect_chain: list[str] = []
+        blocked_redirect: list[str] = []
+        if is_real_site:
+
+            def guard_navigation(route: Any, request: Any) -> None:
+                if request.is_navigation_request() and request.frame == page.main_frame:
+                    target = request.url
+                    redirect_chain.append(target)
+                    if not domain_is_allowed(normalize_hostname(target), REAL_SITE.allowed_domains):
+                        blocked_redirect.append(target)
+                        route.abort()
+                        return
+                route.continue_()
+
+            page.route("**/*", guard_navigation)
         try:
             page.goto(url)
+            result.redirect_chain = list(dict.fromkeys(redirect_chain or [url]))
         except Exception as exc:
+            result.redirect_chain = list(dict.fromkeys(redirect_chain or [url]))
+            if blocked_redirect:
+                result.status = "blocked_unapproved_redirect"
+                result.review_item_ids.append(
+                    _review(
+                        connection,
+                        "unapproved_redirect",
+                        f"Blocked redirect to {normalize_hostname(blocked_redirect[-1])}",
+                        "Approve the exact redirected domain before retrying",
+                        {
+                            "job_id": job_id,
+                            "run_id": run_id,
+                            "redirect_chain": redirect_chain,
+                        },
+                    )
+                )
+                page.screenshot(path=screenshot_path)
+                result.screenshot_path = str(screenshot_path)
+                connection.execute(
+                    """
+                    UPDATE automation_runs SET status=?, screenshot_path=?, state_json=?,
+                      updated_at=? WHERE id=?
+                    """,
+                    (
+                        result.status,
+                        str(screenshot_path),
+                        json.dumps(result.model_dump()),
+                        utc_now(),
+                        run_id,
+                    ),
+                )
+                browser_context.close()
+                connection.commit()
+                return result
             result.status = "navigation_failure"
             result.review_item_ids.append(
                 _review(
@@ -197,7 +313,40 @@ def run_automation(
                     {"error": redact_text(str(exc)), "run_id": run_id},
                 )
             )
-            browser.close()
+            browser_context.close()
+            connection.commit()
+            return result
+        if REAL_SITE.screenshot_checkpoints or not is_real_site:
+            page.screenshot(path=before_path)
+
+        body_text = page.locator("body").inner_text().casefold()
+        if is_real_site and authentication_required(body_text):
+            page.screenshot(path=screenshot_path)
+            result.status = "human_intervention_required"
+            result.screenshot_path = str(screenshot_path)
+            result.review_item_ids.append(
+                _review(
+                    connection,
+                    "human_intervention_required",
+                    "Authentication, account creation, or email verification is required",
+                    "Complete authentication manually in the preserved browser profile",
+                    {"job_id": job_id, "run_id": run_id},
+                )
+            )
+            connection.execute(
+                """
+                UPDATE automation_runs SET status=?, screenshot_path=?, state_json=?,
+                  updated_at=? WHERE id=?
+                """,
+                (
+                    result.status,
+                    str(screenshot_path),
+                    json.dumps(result.model_dump()),
+                    utc_now(),
+                    run_id,
+                ),
+            )
+            browser_context.close()
             connection.commit()
             return result
 
@@ -221,7 +370,9 @@ def run_automation(
             result.captcha = captcha
             result.review_item_ids.append(review_id)
             result.screenshot_path = str(screenshot_path)
-            result.resume_command = f"jobbot browser resume {run_id}"
+            result.resume_command = f"jobbot browser resume {run_id}" + (
+                " --allow-real-site" if is_real_site else ""
+            )
             connection.execute(
                 """
                 UPDATE automation_runs SET status=?, screenshot_path=?, state_json=?,
@@ -236,7 +387,7 @@ def run_automation(
                 ),
             )
             connection.commit()
-            browser.close()
+            browser_context.close()
             return result
 
         fields = page.locator("input, select, textarea")
@@ -335,7 +486,18 @@ def run_automation(
                         {"error": redact_text(str(exc)), "field": name, "run_id": run_id},
                     )
                 )
-        submit_count = page.locator('button[type="submit"], input[type="submit"]').count()
+        terminal_selector = (
+            'button[type="submit"], input[type="submit"], '
+            'button:has-text("Submit Application"), button:has-text("Submit"), '
+            'button:has-text("Complete Application"), button:has-text("Finish"), '
+            'button:has-text("Apply")'
+        )
+        terminal_controls = page.locator(terminal_selector)
+        submit_count = terminal_controls.count()
+        result.terminal_control_detected = [
+            (terminal_controls.nth(index).inner_text() or "").strip()
+            for index in range(submit_count)
+        ]
         page.screenshot(path=screenshot_path)
         result.screenshot_path = str(screenshot_path)
         result.stopped_before_submit = bool(submit_count)
@@ -352,7 +514,7 @@ def run_automation(
                     {"run_id": run_id},
                 )
             )
-        browser.close()
+        browser_context.close()
     connection.execute(
         """
         UPDATE automation_runs SET status=?, screenshot_path=?, state_json=?, updated_at=?
@@ -371,7 +533,12 @@ def run_automation(
 
 
 def resume_run(
-    connection: sqlite3.Connection, run_id: int, *, visible: bool = True
+    connection: sqlite3.Connection,
+    run_id: int,
+    *,
+    visible: bool = True,
+    allow_real_site: bool = False,
+    selected_resume: str | None = None,
 ) -> AutomationResult:
     row = connection.execute("SELECT * FROM automation_runs WHERE id = ?", (run_id,)).fetchone()
     if row is None:
@@ -384,4 +551,6 @@ def resume_run(
         mode="automatic_dry_run",
         visible=visible,
         job_id=row["job_id"],
+        allow_real_site=allow_real_site,
+        selected_resume=selected_resume,
     )
