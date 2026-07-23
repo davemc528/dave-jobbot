@@ -10,6 +10,7 @@ import { lillyAdapter } from "./adapters/lilly";
 import { oracleAdapter } from "./adapters/oracle";
 import { workdayAdapter } from "./adapters/workday";
 import { waitForRenderedContent } from "./stabilization";
+import type { StabilizationResult } from "./stabilization";
 import {
   CapturePayload,
   CaptureResult,
@@ -168,7 +169,7 @@ function buildCapture(
   location: Location,
   tabKey: string,
   captureId: string,
-  stabilizationTimedOut: boolean
+  stabilization?: StabilizationResult
 ): CaptureResult {
   const hostname = exactHostname(location.href);
   const { best, jsonLd, attempts } = extractionAttempts(document, hostname);
@@ -194,9 +195,17 @@ function buildCapture(
     document_ready_state: document.readyState,
     json_ld_block_count: document.querySelectorAll("script[type='application/ld+json']").length,
     likely_container_count: likelyContentContainers(document).length,
-    page_still_mutating: stabilizationTimedOut,
+    page_still_mutating: Boolean(
+      stabilization?.timedOut && stabilization.meaningfulMutationCount
+    ),
     selection_present: Boolean(document.getSelection()?.toString().trim()),
-    stabilization_timed_out: stabilizationTimedOut,
+    stabilization_timed_out: stabilization?.timedOut ?? false,
+    stabilization_duration_ms: stabilization?.durationMs,
+    initial_visible_text_length: stabilization?.initialTextLength,
+    final_visible_text_length: stabilization?.finalTextLength,
+    mutation_count: stabilization?.mutationCount,
+    meaningful_mutation_count: stabilization?.meaningfulMutationCount,
+    last_mutation_at: stabilization?.lastMutationAt,
     attempts
   };
   if (text.length < MINIMUM_SAVE_LENGTH) {
@@ -227,8 +236,8 @@ function buildCapture(
     page_title: document.title,
     json_ld: jsonLd,
     captured_at: new Date().toISOString(),
-    requires_human_review: lowConfidence || stabilizationTimedOut,
-    stabilization_timed_out: stabilizationTimedOut
+    requires_human_review: lowConfidence || Boolean(stabilization?.timedOut),
+    stabilization_timed_out: stabilization?.timedOut ?? false
   };
   return { capture_id: captureId, payload, diagnostics, short_content: lowConfidence };
 }
@@ -239,7 +248,7 @@ export function extractPosting(
   tabKey: string,
   captureId = crypto.randomUUID()
 ): CapturePayload {
-  const result = buildCapture(document, location, tabKey, captureId, false);
+  const result = buildCapture(document, location, tabKey, captureId);
   if (!result.payload) throw new Error("No job detected: visible posting content is too short");
   return result.payload;
 }
@@ -257,6 +266,6 @@ export async function captureFreshPosting(
     location,
     request.tabKey,
     request.capture_id,
-    stabilization.timedOut
+    stabilization
   );
 }

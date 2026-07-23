@@ -1,5 +1,6 @@
 import { isExtensionMessage } from "./shared/schemas";
 import { responseMatchesCapture } from "./shared/capture";
+import { withDeadline } from "./shared/timeouts";
 
 const activeCaptures = new Map<number, string>();
 
@@ -8,6 +9,12 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
     sendResponse({ error: "invalid_message" });
     return false;
   }
+  let responded = false;
+  const respond = (value: object): void => {
+    if (responded) return;
+    responded = true;
+    sendResponse(value);
+  };
   void (async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id || !tab.url) throw new Error("No active browser tab");
@@ -19,27 +26,59 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
         ? (message.payload as Record<string, unknown>).capture_id
         : undefined;
     if (typeof captureId === "string") activeCaptures.set(tab.id, captureId);
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ["content.js"]
-    });
-    const response = await chrome.tabs.sendMessage(tab.id, message);
+    await withDeadline(
+      chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ["content.js"]
+      }),
+      3_000,
+      "content_injection_timeout",
+      "The content script could not be injected before its deadline."
+    );
+    const response = await withDeadline(
+      chrome.tabs.sendMessage(tab.id, message),
+      12_000,
+      "extension_message_timeout",
+      "The page did not return a capture response in time."
+    );
     if (
       typeof captureId === "string" &&
       (!responseMatchesCapture(activeCaptures.get(tab.id), captureId) ||
         typeof response !== "object" ||
         response === null ||
-        !responseMatchesCapture(
-          captureId,
-          (response as Record<string, unknown>).capture_id
-        ))
+        !responseMatchesCapture(captureId, (response as Record<string, unknown>).captureId))
     ) {
-      sendResponse({ error: "stale_capture_response", capture_id: captureId });
+      respond({
+        ok: false,
+        captureId,
+        stage: "capture_failed",
+        error: {
+          code: "stale_capture_response",
+          message: "A stale content-script response was ignored."
+        }
+      });
       return;
     }
-    sendResponse({ ...response, tabId: tab.id, tabUrl: tab.url });
+    respond({ ...response, tabId: tab.id, tabUrl: tab.url });
   })().catch((error: unknown) => {
-    sendResponse({ error: error instanceof Error ? error.message : "service_worker_error" });
+    respond({
+      ok: false,
+      captureId:
+        typeof message.payload === "object" &&
+        message.payload !== null &&
+        "capture_id" in message.payload
+          ? String(message.payload.capture_id)
+          : "unknown",
+      stage: "capture_failed",
+      error: {
+        code:
+          typeof error === "object" && error !== null && "code" in error
+            ? String(error.code)
+            : "service_worker_error",
+        message:
+          error instanceof Error ? error.message : "The extension service worker failed."
+      }
+    });
   });
   return true;
 });

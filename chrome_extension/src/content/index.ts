@@ -11,6 +11,7 @@ import {
   isExtensionMessage,
   isFillPlan
 } from "../shared/schemas";
+import { withDeadline } from "../shared/timeouts";
 
 interface JobbotContentGlobal {
   __daveJobbotContentInstalled?: boolean;
@@ -41,23 +42,60 @@ if (!contentState.__daveJobbotContentInstalled) {
         return false;
       }
       const request = message.payload;
+      let responded = false;
+      const respond = (value: object): void => {
+        if (responded) return;
+        responded = true;
+        sendResponse(value);
+      };
       contentState.__daveJobbotStopped = false;
       contentState.__daveJobbotCaptureId = request.capture_id;
-      void captureFreshPosting(document, location, request)
+      void withDeadline(
+        captureFreshPosting(document, location, request),
+        10_000,
+        "page_extraction_timeout",
+        "Page extraction did not finish before its deadline."
+      )
         .then((result) => {
           if (
             contentState.__daveJobbotStopped ||
             contentState.__daveJobbotCaptureId !== result.capture_id
           ) {
-            sendResponse({ error: "stale_capture_response", capture_id: result.capture_id });
+            respond({
+              ok: false,
+              captureId: result.capture_id,
+              stage: "capture_cancelled",
+              error: {
+                code: "stale_capture_response",
+                message: "A newer capture replaced this response."
+              }
+            });
             return;
           }
-          sendResponse(result);
+          respond({
+            ok: true,
+            captureId: result.capture_id,
+            stage: result.short_content
+              ? "capture_succeeded_low_confidence"
+              : "capture_succeeded",
+            result
+          });
         })
         .catch((error: unknown) => {
-          sendResponse({
-            error: error instanceof Error ? error.message : "content_script_error",
-            capture_id: request.capture_id
+          respond({
+            ok: false,
+            captureId: request.capture_id,
+            stage: "capture_failed",
+            error: {
+              code:
+                typeof error === "object" &&
+                error !== null &&
+                "code" in error
+                  ? String(error.code)
+                  : "content_script_error",
+              message:
+                error instanceof Error ? error.message : "Content-script capture failed."
+            }
           });
         });
       return true;

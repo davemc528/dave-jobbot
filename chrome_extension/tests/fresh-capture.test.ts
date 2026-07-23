@@ -6,6 +6,7 @@ import {
   TRANSIENT_CAPTURE_KEYS
 } from "../src/shared/capture";
 import { waitForRenderedContent } from "../src/content/stabilization";
+import { DeadlineError, withDeadline } from "../src/shared/timeouts";
 
 describe("fresh capture lifecycle", () => {
   it("creates a new capture ID for every click-equivalent request", () => {
@@ -53,7 +54,7 @@ describe("fresh capture lifecycle", () => {
       maxWaitMs: 500
     });
     expect(result.timedOut).toBe(false);
-    expect(result.visibleTextLength).toBeGreaterThan(10);
+    expect(result.finalTextLength).toBeGreaterThan(10);
   });
 
   it("times out safely while content continues mutating", async () => {
@@ -72,6 +73,70 @@ describe("fresh capture lifecycle", () => {
     });
     clearInterval(interval);
     expect(result.timedOut).toBe(true);
-    expect(result.stillMutating).toBe(true);
+    expect(result.meaningfulMutationCount).toBeGreaterThan(0);
+  });
+
+  it("ignores continuous irrelevant mutations outside the job container", async () => {
+    const dom = new JSDOM("<header>Clock</header><main>Stable job description</main>");
+    Object.defineProperty(dom.window.document, "readyState", {
+      configurable: true,
+      value: "complete"
+    });
+    const interval = setInterval(() => {
+      dom.window.document.querySelector("header")!.textContent = String(Date.now());
+    }, 10);
+    const result = await waitForRenderedContent(dom.window.document, {
+      stableMs: 60,
+      sampleMs: 10,
+      maxWaitMs: 300
+    });
+    clearInterval(interval);
+    expect(result.stable).toBe(true);
+    expect(result.timedOut).toBe(false);
+    expect(result.meaningfulMutationCount).toBe(0);
+  });
+
+  it("disconnects its observer when stabilization completes", async () => {
+    const dom = new JSDOM("<main>Stable job description</main>");
+    Object.defineProperty(dom.window.document, "readyState", {
+      configurable: true,
+      value: "complete"
+    });
+    const NativeObserver = dom.window.MutationObserver;
+    let disconnected = false;
+    class TrackingObserver extends NativeObserver {
+      override disconnect(): void {
+        disconnected = true;
+        super.disconnect();
+      }
+    }
+    Object.defineProperty(dom.window, "MutationObserver", {
+      configurable: true,
+      value: TrackingObserver
+    });
+    await waitForRenderedContent(dom.window.document, {
+      stableMs: 30,
+      sampleMs: 5,
+      maxWaitMs: 100
+    });
+    expect(disconnected).toBe(true);
+  });
+
+  it("runs timeout cleanup so a bridge request can be aborted", async () => {
+    let aborted = false;
+    await expect(
+      withDeadline(
+        new Promise<never>(() => undefined),
+        20,
+        "bridge_timeout",
+        "Bridge timed out",
+        () => {
+          aborted = true;
+        }
+      )
+    ).rejects.toEqual(expect.objectContaining<Partial<DeadlineError>>({
+      code: "bridge_timeout"
+    }));
+    expect(aborted).toBe(true);
   });
 });

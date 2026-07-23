@@ -1,6 +1,7 @@
 import { BRIDGE, STORAGE_KEYS } from "../shared/messages";
 import { FreshCaptureLifecycle, TRANSIENT_CAPTURE_KEYS } from "../shared/capture";
 import { exactHostname } from "../shared/urls";
+import { DeadlineError, withDeadline } from "../shared/timeouts";
 import {
   CapturePayload,
   CaptureResult,
@@ -38,17 +39,59 @@ async function api<T>(
   authenticated = true
 ): Promise<T> {
   const token = await storedToken();
-  const response = await fetch(`${BRIDGE}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(authenticated && token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options.headers
+  const controller = new AbortController();
+  const started = performance.now();
+  try {
+    const response = await withDeadline(
+      fetch(`${BRIDGE}${path}`, {
+        ...options,
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          ...(authenticated && token ? { Authorization: `Bearer ${token}` } : {}),
+          ...options.headers
+        }
+      }),
+      15_000,
+      "bridge_timeout",
+      "The page was captured, but the local bridge did not respond in time.",
+      () => controller.abort()
+    );
+    let body: Record<string, unknown>;
+    try {
+      body = (await response.json()) as Record<string, unknown>;
+    } catch {
+      throw new DeadlineError(
+        "malformed_bridge_response",
+        "The local bridge returned an unreadable response."
+      );
     }
-  });
-  const body = await response.json() as Record<string, unknown>;
-  if (!response.ok) throw new Error(JSON.stringify(body));
-  return body as T;
+    if (!response.ok) {
+      const code =
+        response.status === 401
+          ? "bridge_authentication_failure"
+          : "bridge_processing_failure";
+      throw new DeadlineError(code, JSON.stringify(body));
+    }
+    if (state.diagnostics) {
+      state.diagnostics.bridge_duration_ms = Math.round(performance.now() - started);
+    }
+    return body as T;
+  } catch (error) {
+    if (controller.signal.aborted && !(error instanceof DeadlineError)) {
+      throw new DeadlineError(
+        "bridge_timeout",
+        "The page was captured, but the local bridge did not respond in time."
+      );
+    }
+    if (error instanceof TypeError) {
+      throw new DeadlineError(
+        "bridge_connection_failure",
+        "The local bridge could not be reached."
+      );
+    }
+    throw error;
+  }
 }
 
 function text(id: string, value: unknown): void {
@@ -76,7 +119,12 @@ async function ensureHostApproved(hostname: string): Promise<boolean> {
 }
 
 async function sendToTab(type: string, payload?: unknown): Promise<Record<string, unknown>> {
-  return chrome.runtime.sendMessage({ type, payload }) as Promise<Record<string, unknown>>;
+  return withDeadline(
+    chrome.runtime.sendMessage({ type, payload }) as Promise<Record<string, unknown>>,
+    13_000,
+    "extension_message_timeout",
+    "The page did not return a capture response in time."
+  );
 }
 
 async function checkBridge(): Promise<void> {
@@ -148,6 +196,20 @@ async function capture(saveLowConfidence = false): Promise<void> {
   setCaptureBusy(true);
   const pendingRequest = captureLifecycle.begin("pending");
   const captureId = pendingRequest.capture_id;
+  const workflowStarted = performance.now();
+  const transition = (
+    stage: Parameters<typeof captureLifecycle.transition>[0],
+    label: string
+  ): void => {
+    captureLifecycle.transition(stage);
+    text("stage", label);
+    message(label);
+    console.debug("Dave Jobbot capture stage", {
+      capture_id: captureId,
+      stage,
+      at: new Date().toISOString()
+    });
+  };
   state.captureId = captureId;
   state.capture = undefined;
   state.diagnostics = undefined;
@@ -156,70 +218,135 @@ async function capture(saveLowConfidence = false): Promise<void> {
   text("capture-time", new Date().toISOString());
   element("short-actions").hidden = true;
   element("extraction-preview").textContent = "";
-  message("Reading current page");
-  text("stage", "Reading current page");
+  transition("reading_tab", "Reading current page");
   try {
-  const tab = await activeTab();
-  const hostname = exactHostname(tab.url!);
-  text("page-title", tab.title);
-  text("hostname", hostname);
-  if (!(await ensureHostApproved(hostname))) return;
-  message("Waiting for job content");
-  text("stage", "Waiting for job content");
-  const started = performance.now();
-  const response = await sendToTab("capture_current_page", {
-    ...pendingRequest,
-    tabKey: String(tab.id)
-  });
-  if (state.captureId !== captureId) return;
-  if (response.error) throw new Error(String(response.error));
-  const result = response as unknown as CaptureResult;
-  if (result.capture_id !== captureId) throw new Error("Stale capture response ignored");
-  renderDiagnostics(result.diagnostics);
-  message("Extracting rendered posting");
-  text("stage", "Extracting rendered posting");
-  const payload = result.payload;
-  console.debug("Dave Jobbot fresh capture", {
-    capture_id: captureId,
-    tab_id: tab.id,
-    url: result.diagnostics.url,
-    extraction_method: payload?.extraction_method,
-    text_length: payload?.full_text.length ?? 0,
-    confidence: payload?.extraction_confidence,
-    duration_ms: Math.round(performance.now() - started),
-    stabilization_timeout: result.diagnostics.stabilization_timed_out,
-    error_category: payload ? undefined : "short_content"
-  });
-  if (!payload) {
-    element("short-actions").hidden = false;
-    text("stage", "No job detected");
-    message("Rendered content is still too short. Review Capture Diagnostics and retry.");
-    return;
-  }
-  state.capture = payload;
-  text("extraction-method", payload.extraction_method);
-  text("text-length", payload.full_text.length);
-  text("capture-confidence", payload.extraction_confidence.toFixed(2));
-  text("capture-time", payload.captured_at);
-  if ((result.short_content || payload.requires_human_review) && !saveLowConfidence) {
-    await chrome.storage.local.set({
-      [STORAGE_KEYS.extractionPreview]: payload.full_text,
-      [STORAGE_KEYS.lastCapturePayload]: payload
-    });
-    element("short-actions").hidden = false;
-    element("extraction-preview").textContent = payload.full_text.slice(0, 2_000);
-    message("Low-confidence capture requires review before it can be saved.");
-    return;
-  }
-  await saveCapture(payload);
+    await withDeadline(
+      (async () => {
+        const tab = await activeTab();
+        const hostname = exactHostname(tab.url!);
+        text("page-title", tab.title);
+        text("hostname", hostname);
+        if (!(await ensureHostApproved(hostname))) {
+          captureLifecycle.transition("cancelled");
+          return;
+        }
+        transition("waiting_for_content", "Waiting for job content");
+        const response = await sendToTab("capture_current_page", {
+          ...pendingRequest,
+          tabKey: String(tab.id)
+        });
+        if (state.captureId !== captureId) return;
+        const envelope = response as {
+          ok?: boolean;
+          captureId?: string;
+          result?: CaptureResult;
+          error?: { code?: string; message?: string };
+        };
+        if (!envelope.ok || !envelope.result) {
+          throw new DeadlineError(
+            envelope.error?.code ?? "missing_content_script_response",
+            envelope.error?.message ?? "The content script returned no capture result."
+          );
+        }
+        if (envelope.captureId !== captureId) {
+          throw new DeadlineError(
+            "stale_capture_response",
+            "A stale capture response was ignored."
+          );
+        }
+        const result = envelope.result;
+        result.diagnostics.active_tab_id = tab.id;
+        result.diagnostics.current_stage = "extracting";
+        renderDiagnostics(result.diagnostics);
+        transition("extracting", "Extracting rendered posting");
+        const payload = result.payload;
+        if (!payload) {
+          result.diagnostics.final_stage = "failed";
+          result.diagnostics.final_error_code = "insufficient_visible_content";
+          result.diagnostics.total_duration_ms = Math.round(
+            performance.now() - workflowStarted
+          );
+          renderDiagnostics(result.diagnostics);
+          element("short-actions").hidden = false;
+          captureLifecycle.transition("failed");
+          text("stage", "Capture failed");
+          message("No useful rendered content was found. Review diagnostics and retry.");
+          return;
+        }
+        state.capture = payload;
+        text("extraction-method", payload.extraction_method);
+        text("text-length", payload.full_text.length);
+        text("capture-confidence", payload.extraction_confidence.toFixed(2));
+        text("capture-time", payload.captured_at);
+        if ((result.short_content || payload.requires_human_review) && !saveLowConfidence) {
+          await chrome.storage.local.set({
+            [STORAGE_KEYS.extractionPreview]: payload.full_text,
+            [STORAGE_KEYS.lastCapturePayload]: payload
+          });
+          element("short-actions").hidden = false;
+          element("extraction-preview").textContent = payload.full_text.slice(0, 2_000);
+          captureLifecycle.transition("low_confidence");
+          result.diagnostics.final_stage = "low_confidence";
+          result.diagnostics.total_duration_ms = Math.round(
+            performance.now() - workflowStarted
+          );
+          renderDiagnostics(result.diagnostics);
+          text("stage", "Low-confidence capture");
+          message(
+            payload.stabilization_timed_out
+              ? "Oracle continued changing the page, so Jobbot captured the best visible content after the time limit."
+              : "Low-confidence capture requires confirmation before it can be saved."
+          );
+          return;
+        }
+        transition("sending_to_bridge", "Sending capture to local bridge");
+        await saveCapture(payload);
+        captureLifecycle.transition("succeeded");
+        if (state.diagnostics) {
+          state.diagnostics.final_stage = "succeeded";
+          state.diagnostics.total_duration_ms = Math.round(
+            performance.now() - workflowStarted
+          );
+          renderDiagnostics(state.diagnostics);
+        }
+      })(),
+      25_000,
+      "capture_workflow_timeout",
+      "Capture exceeded its total 25-second deadline.",
+      () => {
+        state.captureId = undefined;
+        captureLifecycle.transition("timed_out");
+        setCaptureBusy(false);
+        void sendToTab("stop").catch(() => undefined);
+      }
+    );
   } catch (error) {
+    const code =
+      error instanceof DeadlineError ? error.code : "capture_failed";
+    captureLifecycle.transition(
+      code.includes("timeout") ? "timed_out" : "failed"
+    );
+    text(
+      "stage",
+      code.includes("timeout") ? "Capture timed out" : "Capture failed"
+    );
+    message(error instanceof Error ? error.message : "Capture failed.");
+    const finalDiagnostics = state.diagnostics as ExtractionDiagnostics | undefined;
+    if (finalDiagnostics) {
+      finalDiagnostics.final_stage = captureLifecycle.stage;
+      finalDiagnostics.final_error_code = code;
+      finalDiagnostics.total_duration_ms = Math.round(
+        performance.now() - workflowStarted
+      );
+      renderDiagnostics(finalDiagnostics);
+    }
     await chrome.storage.local.set({
       [STORAGE_KEYS.lastCaptureError]:
         error instanceof Error ? error.message : "capture_failed"
     });
-    throw error;
   } finally {
-    if (captureLifecycle.finish(captureId)) setCaptureBusy(false);
+    captureLifecycle.finish(captureId);
+    setCaptureBusy(false);
   }
 }
 
@@ -353,6 +480,11 @@ bind("preview-visible", () => {
   element("extraction-preview").textContent =
     state.capture?.full_text ??
     `Visible body length: ${state.diagnostics?.visible_body_text_length ?? 0}`;
+});
+bind("copy-diagnostics", async () => {
+  if (!state.diagnostics) throw new Error("No diagnostics are available");
+  await navigator.clipboard.writeText(JSON.stringify(state.diagnostics, null, 2));
+  message("Sanitized capture diagnostics copied.");
 });
 bind("save-low-confidence", async () => {
   if (!state.capture) throw new Error("No usable low-confidence capture is available");

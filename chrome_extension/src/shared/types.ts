@@ -54,6 +54,18 @@ export interface ExtractionDiagnostics {
   page_still_mutating: boolean;
   selection_present: boolean;
   stabilization_timed_out: boolean;
+  stabilization_duration_ms?: number;
+  initial_visible_text_length?: number;
+  final_visible_text_length?: number;
+  mutation_count?: number;
+  meaningful_mutation_count?: number;
+  last_mutation_at?: string | null;
+  active_tab_id?: number;
+  current_stage?: string;
+  final_stage?: string;
+  bridge_duration_ms?: number;
+  total_duration_ms?: number;
+  final_error_code?: string;
   attempts: Array<{ method: string; text_length: number; rejection_reason?: string }>;
 }
 
