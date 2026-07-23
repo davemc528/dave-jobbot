@@ -1,11 +1,35 @@
-import { AdapterResult, visibleText } from "./generic";
+import {
+  AdapterResult,
+  likelyContentContainers,
+  openShadowText,
+  visibleText
+} from "./generic";
 
 export function oracleAdapter(document: Document): AdapterResult {
-  const root =
-    document.querySelector("[data-bind*='job']") ??
-    document.querySelector(".job-details") ??
-    document.querySelector("main");
-  const text = visibleText(root);
+  const candidates = likelyContentContainers(document);
+  const headingSections = [...document.querySelectorAll("h1,h2,h3,h4")]
+    .filter((heading) =>
+      /responsibilit|qualification|requirement|job information|job description|about the role/i.test(
+        heading.textContent ?? ""
+      )
+    )
+    .map((heading) => heading.closest("section,article,div"))
+    .filter((element): element is Element => Boolean(element));
+  const frameText: string[] = [];
+  for (const frame of document.querySelectorAll<HTMLIFrameElement>("iframe")) {
+    try {
+      if (frame.contentDocument) frameText.push(visibleText(frame.contentDocument.body));
+    } catch {
+      // Cross-origin frames are intentionally inaccessible.
+    }
+  }
+  const scored = [...new Set([...candidates, ...headingSections])]
+    .map((element) => visibleText(element))
+    .sort((a, b) => b.length - a.length);
+  const text = [scored[0] ?? "", openShadowText(document), ...frameText]
+    .filter(Boolean)
+    .join("\n")
+    .trim();
   const requisition = text.match(/\b(?:requisition|job)\s*(?:id|number)?\s*:?\s*(\d{3,})/i);
   return {
     text,

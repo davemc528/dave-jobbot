@@ -18,11 +18,30 @@ export function visibleText(element: Element | null): string {
   return (clone.innerText || clone.textContent || "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+export function likelyContentContainers(document: Document): Element[] {
+  const selector =
+    "main,article,[role='main'],[data-bind*='job' i],[class*='job-detail' i]," +
+    "[class*='job-description' i],[id*='job-detail' i],[id*='job-description' i]";
+  return [...document.querySelectorAll(selector)];
+}
+
+export function openShadowText(document: Document): string {
+  const values: string[] = [];
+  const visit = (root: Document | ShadowRoot): void => {
+    for (const element of root.querySelectorAll<HTMLElement>("*")) {
+      if (element.shadowRoot) {
+        values.push(visibleText(element.shadowRoot.host));
+        visit(element.shadowRoot);
+      }
+    }
+  };
+  visit(document);
+  return values.join("\n").trim();
+}
+
 export function genericAdapter(document: Document): AdapterResult {
   const candidates = [
-    document.querySelector("main"),
-    document.querySelector("article"),
-    document.querySelector("[role='main']"),
+    ...likelyContentContainers(document),
     document.body
   ];
   const scored = candidates
