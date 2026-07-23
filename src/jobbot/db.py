@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 from .config import DB_PATH
-from .migrations import record_phase_15_migration
+from .migrations import record_phase_15_migration, record_phase_16_migration
 
 
 def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
@@ -195,7 +195,46 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_profile_audit_fact
             ON profile_audit_log(canonical_fact_id);
 
+        CREATE TABLE IF NOT EXISTS application_answers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            field_name TEXT NOT NULL UNIQUE,
+            canonical_value TEXT,
+            display_value TEXT,
+            raw_value TEXT,
+            verification_status TEXT NOT NULL,
+            verification_method TEXT,
+            sensitivity TEXT NOT NULL,
+            autofill_permission INTEGER NOT NULL DEFAULT 0,
+            question_categories TEXT NOT NULL DEFAULT '[]',
+            date_verified TEXT,
+            review_notes TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS automation_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER,
+            mode TEXT NOT NULL,
+            status TEXT NOT NULL,
+            url TEXT NOT NULL,
+            screenshot_path TEXT,
+            state_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_automation_runs_job
+            ON automation_runs(job_id, created_at);
+
         """
     )
     record_phase_15_migration(connection)
+    record_phase_16_migration(connection)
+    review_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(review_items)").fetchall()
+    }
+    if "recommended_action" not in review_columns:
+        connection.execute("ALTER TABLE review_items ADD COLUMN recommended_action TEXT")
+    if "metadata" not in review_columns:
+        connection.execute("ALTER TABLE review_items ADD COLUMN metadata TEXT")
     connection.commit()

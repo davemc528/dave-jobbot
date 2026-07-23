@@ -4,6 +4,7 @@
   <body>
     <form>
       <label>First name <input name="first_name"></label>
+      <label>Preferred name <input name="preferred_name"></label>
       <label>Last name <input name="last_name"></label>
       <label>Email <input name="email" type="email"></label>
       <label>Phone <input name="phone" type="tel"></label>
@@ -20,8 +21,30 @@
         <option value="">Select</option><option>Yes</option><option>No</option>
         <option>Prefer not to answer</option>
       </select></label>
+      <label>Will you now or in the future require visa sponsorship?
+        <select name="requires_sponsorship"><option>Yes</option><option>No</option></select>
+      </label>
+      <label>Are you legally authorized to work in the United States?
+        <select name="legal_authorization"><option>Yes</option><option>No</option></select>
+      </label>
+      <label>Have you previously worked for Baylor College of Medicine?
+        <select name="previous_baylor"><option>Yes</option><option>No</option></select>
+      </label>
+      <label>Are you subject to a noncompete?
+        <select name="noncompete"><option>Yes</option><option>No</option></select>
+      </label>
       <label>Travel <input name="travel"></label>
+      <label>Can you travel up to 50%? <input name="travel_50"></label>
       <label>Relocation <input name="relocation"></label>
+      <label>Preferred relocation destinations <input name="relocation_destinations"></label>
+      <label>Desired compensation <input name="compensation"></label>
+      <label>Minimum salary amount <input name="numeric_compensation" type="number"></label>
+      <label>When can you start? <input name="start_availability"></label>
+      <label>Earliest start date <input name="start_date" type="date"></label>
+      <label>Notice period <input name="notice_period"></label>
+      <label><input name="onsite" type="checkbox"> On-site workplace preference</label>
+      <label><input name="remote" type="checkbox"> Remote workplace preference</label>
+      <label><input name="hybrid" type="checkbox"> Hybrid workplace preference</label>
       <label>Resume <input name="resume" type="file"></label>
       <label>Publication <textarea name="publication"></textarea></label>
       <label>Qualifications <textarea name="qualifications"></textarea></label>

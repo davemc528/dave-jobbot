@@ -5,6 +5,8 @@ from collections import Counter
 import streamlit as st
 
 from jobbot.db import get_connection
+from jobbot.config import AUTOMATION
+from jobbot.profile.application_answers import WORK_AUTH_WARNING, list_answers, utc_now
 from jobbot.profile.canonical import (
     INTAKE_FIELDS,
     apply_canonical_proposals,
@@ -292,10 +294,94 @@ def _jobs_page() -> None:
     st.write("Manual review is mandatory; final submission is not implemented.")
 
 
+def _application_answers_page() -> None:
+    st.title("Application Answers")
+    connection = get_connection()
+    answers = list_answers(connection)
+    st.error(f"Unresolved work-authorization warning: {WORK_AUTH_WARNING}")
+    for answer in answers:
+        with st.expander(
+            f"{answer.field_name}: {answer.display_value} [{answer.verification_status}]"
+        ):
+            st.write("Question categories:", answer.question_categories)
+            st.write("Autofill:", answer.autofill_permission)
+            st.write("Sensitivity:", answer.sensitivity)
+            st.write("Last verified:", answer.date_verified)
+            edited = st.text_input(
+                "Verified value",
+                answer.canonical_value or "",
+                key=f"answer-value-{answer.id}",
+            )
+            disable = st.checkbox(
+                "Disable autofill",
+                value=not answer.autofill_permission,
+                key=f"answer-disable-{answer.id}",
+            )
+            if st.button("Save answer", key=f"answer-save-{answer.id}"):
+                connection.execute(
+                    """
+                    UPDATE application_answers SET canonical_value=?, display_value=?,
+                      autofill_permission=?, updated_at=? WHERE id=?
+                    """,
+                    (edited, edited, int(not disable), utc_now(), answer.id),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO profile_audit_log
+                      (action, actor, after_json, notes, created_at)
+                    VALUES ('application_answer_edited', 'human', ?, ?, ?)
+                    """,
+                    (
+                        f'{{"field_name": "{answer.field_name}", "autofill": {str(not disable).lower()}}}',
+                        "Value edited in local verification dashboard",
+                        utc_now(),
+                    ),
+                )
+                connection.commit()
+                st.rerun()
+    st.header("Answer audit history")
+    audit = connection.execute(
+        """
+        SELECT created_at, action, after_json, notes FROM profile_audit_log
+        WHERE action IN ('approved_default_applied', 'ambiguous_default_recorded',
+                         'application_answer_edited')
+        ORDER BY id DESC LIMIT 100
+        """
+    ).fetchall()
+    st.dataframe([dict(row) for row in audit], width="stretch")
+
+    st.header("Automation Readiness")
+    st.write(
+        {
+            "automatic_dry_run_enabled": AUTOMATION.enabled,
+            "configured_mode": AUTOMATION.mode,
+            "final_submit_enabled": AUTOMATION.final_submit_enabled,
+            "captcha_policy": AUTOMATION.captcha_policy,
+            "visible_browser": AUTOMATION.visible_browser,
+            "confidence_threshold": AUTOMATION.minimum_autofill_confidence,
+            "stop_before_submit": AUTOMATION.stop_before_submit,
+        }
+    )
+    blockers = connection.execute(
+        "SELECT count(*) FROM review_items WHERE status='pending'"
+    ).fetchone()[0]
+    st.metric("Unresolved automation blockers", blockers)
+    st.warning(
+        "Automatic real-site execution is disabled. Local automatic dry-run is ready "
+        "only when the selected fixture/job has no unresolved required-field blocker."
+    )
+    connection.close()
+
+
 def launch_dashboard() -> None:
-    page = st.sidebar.radio("Page", ["Profile Verification", "Jobs and applications"])
+    page = st.sidebar.radio(
+        "Page",
+        ["Profile Verification", "Application Answers", "Jobs and applications"],
+    )
     if page == "Profile Verification":
         _verification_page()
+    elif page == "Application Answers":
+        _application_answers_page()
     else:
         _jobs_page()
 

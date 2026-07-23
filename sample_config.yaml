@@ -11,3 +11,12 @@ llm:
   model: llama3.2
 privacy:
   redact_logs: true
+automation:
+  enabled: false
+  mode: automatic_dry_run
+  final_submit_enabled: false
+  visible_browser: true
+  stop_before_submit: true
+  captcha_policy: pause_for_human
+  minimum_autofill_confidence: 0.92
+  maximum_travel_percentage: 60

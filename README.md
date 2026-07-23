@@ -49,6 +49,35 @@ sponsorship, compensation, relocation, travel, noncompete, prior-employer, start
 values are therefore not persisted; mark them manual-only in the questionnaire. EEO supports
 manual handling, including “Prefer not to answer.”
 
+Phase I.6 makes a narrow exception for the exact application answers explicitly supplied in that
+phase's user instruction. They are stored only in the ignored local SQLite database with
+verification provenance. Database encryption at rest is still not implemented; protect the local
+data directory and do not copy it into source control.
+
+## Phase I.6 verified application answers
+
+Apply the values explicitly approved for Phase I.6:
+
+```bash
+PYTHONPATH=src uv run python -m jobbot.cli profile intake apply-approved-defaults
+PYTHONPATH=src uv run python -m jobbot.cli profile answers list
+PYTHONPATH=src uv run python -m jobbot.cli profile answers audit
+```
+
+Inspect or run a job in supervised/local automatic-dry-run mode:
+
+```bash
+PYTHONPATH=src uv run python -m jobbot.cli browser inspect JOB_ID
+PYTHONPATH=src uv run python -m jobbot.cli browser autofill JOB_ID --mode supervised
+PYTHONPATH=src uv run python -m jobbot.cli browser autofill JOB_ID --mode automatic-dry-run
+PYTHONPATH=src uv run python -m jobbot.cli review list
+```
+
+Real-site automatic execution remains disabled by configuration. `automatic_submit` is
+unimplemented and always raises a safety error. CAPTCHA detection pauses the run, saves a local
+screenshot, creates a review item, and returns a resume command; it never attempts to solve or
+bypass the challenge.
+
 URL ingestion performs a plain fetch and always requires human review. Browser commands use the
 stored job URL:
 

@@ -12,7 +12,8 @@ from urllib.request import Request, urlopen
 import typer
 
 from jobbot.applications.records import create_application
-from jobbot.browser.playwright_mvp import dry_run_autofill, inspect_form
+from jobbot.browser.automation import AutomationMode, resume_run, run_automation
+from jobbot.browser.playwright_mvp import inspect_form
 from jobbot.config import BASE_DIR, DB_PATH, SOURCE_DIR, ensure_directories
 from jobbot.db import get_connection
 from jobbot.documents.extract import extract_text, infer_document_type
@@ -26,6 +27,10 @@ from jobbot.profile.canonical import (
     propose_canonical_groups,
     seed_phase_15_proposals,
 )
+from jobbot.profile.application_answers import (
+    apply_approved_defaults,
+    list_answers,
+)
 from jobbot.security import safe_log
 from jobbot.tailoring.routing import select_resume_track
 
@@ -35,11 +40,17 @@ job_app = typer.Typer(help="Ingest a job.")
 jobs_app = typer.Typer(help="List and score jobs.")
 application_app = typer.Typer(help="Prepare applications.")
 browser_app = typer.Typer(help="Safely inspect and dry-run application forms.")
+intake_app = typer.Typer(help="Apply explicitly approved profile answers.")
+answers_app = typer.Typer(help="Inspect verified application answers.")
+review_app = typer.Typer(help="Review automation blockers.")
+profile_app.add_typer(intake_app, name="intake")
+profile_app.add_typer(answers_app, name="answers")
 app.add_typer(profile_app, name="profile")
 app.add_typer(job_app, name="job")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(application_app, name="application")
 app.add_typer(browser_app, name="browser")
+app.add_typer(review_app, name="review")
 
 
 @app.command()
@@ -209,6 +220,38 @@ def profile_readiness_command() -> None:
         raise typer.Exit(1)
 
 
+@intake_app.command("apply-approved-defaults")
+def apply_profile_defaults() -> None:
+    with get_connection() as connection:
+        count = apply_approved_defaults(connection)
+    typer.echo(f"Applied {count} explicitly user-approved application answers.")
+
+
+@answers_app.command("list")
+def profile_answers_list() -> None:
+    with get_connection() as connection:
+        answers = list_answers(connection)
+    for answer in answers:
+        typer.echo(
+            f"{answer.field_name}: {answer.display_value} "
+            f"[{answer.verification_status}; autofill={answer.autofill_permission}]"
+        )
+
+
+@answers_app.command("audit")
+def profile_answers_audit() -> None:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT created_at, action, after_json, notes FROM profile_audit_log
+            WHERE action IN ('approved_default_applied', 'ambiguous_default_recorded')
+            ORDER BY id DESC
+            """
+        ).fetchall()
+    for row in rows:
+        typer.echo(dict(row))
+
+
 def _fetch_url(url: str) -> str:
     request = Request(url, headers={"User-Agent": "dave-jobbot/0.1 (manual review)"})
     with urlopen(request, timeout=20) as response:  # noqa: S310
@@ -344,14 +387,58 @@ def browser_inspect(
 @browser_app.command("autofill")
 def browser_autofill(
     job_id: int,
-    dry_run: bool = typer.Option(False, "--dry-run"),
+    mode: str = typer.Option("supervised", "--mode"),
     visible: bool = typer.Option(True, "--visible/--headless"),
 ) -> None:
-    if not dry_run:
-        raise typer.BadParameter("Phase 1 permits only --dry-run autofill")
-    result = dry_run_autofill(_application_url(job_id), visible=visible)
-    safe_log("Browser dry run completed", job_id=job_id, status=result["status"])
-    typer.echo(json.dumps(result, indent=2))
+    normalized_mode = mode.replace("-", "_")
+    if normalized_mode not in {
+        "inspect",
+        "supervised",
+        "automatic_dry_run",
+        "automatic_submit",
+    }:
+        raise typer.BadParameter(f"Unsupported mode: {mode}")
+    with get_connection() as connection:
+        result = run_automation(
+            connection,
+            _application_url(job_id),
+            mode=cast(AutomationMode, normalized_mode),
+            visible=visible,
+            job_id=job_id,
+        )
+    safe_log("Browser dry run completed", job_id=job_id, status=result.status)
+    typer.echo(result.model_dump_json(indent=2))
+
+
+@browser_app.command("resume")
+def browser_resume(run_id: int, visible: bool = typer.Option(True, "--visible/--headless")) -> None:
+    with get_connection() as connection:
+        result = resume_run(connection, run_id, visible=visible)
+    typer.echo(result.model_dump_json(indent=2))
+
+
+@review_app.command("list")
+def review_list() -> None:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, item_type, summary, recommended_action, status
+            FROM review_items WHERE status='pending' ORDER BY id
+            """
+        ).fetchall()
+    for row in rows:
+        typer.echo(dict(row))
+
+
+@review_app.command("resolve")
+def review_resolve(review_id: int) -> None:
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "UPDATE review_items SET status='resolved' WHERE id=?", (review_id,)
+        )
+    if cursor.rowcount == 0:
+        raise typer.BadParameter(f"Unknown review item: {review_id}")
+    typer.echo(f"Resolved review item {review_id}.")
 
 
 @app.command()
